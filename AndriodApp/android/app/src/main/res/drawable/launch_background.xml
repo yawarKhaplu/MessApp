@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launch screen: warm brand background with the house mark centred, so the
+     app opens on its own colours instead of a blank white flash. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/mess_background" />
+
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/ic_mess_logo" />
+    </item>
+</layer-list>
