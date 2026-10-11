@@ -8,6 +8,7 @@ import '../services/notifications.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'rotation_order_screen.dart';
+import 'auth/auth_screen.dart';
 import 'widgets/text_input_dialog.dart';
 
 /// Settings (PRD 6.7): reminder time, reminder toggle, currency, app info.
@@ -61,6 +62,11 @@ class SettingsScreen extends ConsumerWidget {
         data: (settings) => ListView(
           padding: const EdgeInsets.all(16),
           children: [
+            const SectionHeader(title: 'Account', icon: Icons.person_outline),
+            const SizedBox(height: 8),
+            const AccountCard(),
+            const SizedBox(height: 24),
+
             const SectionHeader(title: 'Reminder', icon: Icons.notifications_outlined),
             const SizedBox(height: 8),
             AppCard(

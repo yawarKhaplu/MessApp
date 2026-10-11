@@ -2,6 +2,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'data/models.dart';
 import 'data/repository.dart';
+import 'services/auth_service.dart';
+import 'services/mess_cloud_service.dart';
 import 'services/notifications.dart';
 
 // ---------- Singletons ----------
@@ -10,6 +12,57 @@ final repositoryProvider = Provider<MessRepository>((ref) => MessRepository());
 
 final notificationServiceProvider =
     Provider<NotificationService>((ref) => NotificationService.instance);
+
+/// Google sign-in. Identity only for now: no expense data leaves the device.
+/// Shared data is a separate step, so this establishes WHO, not WHAT.
+final authServiceProvider = Provider<AuthService>((ref) => AuthService());
+
+/// Membership layer: which mess this person belongs to and what they may do.
+/// Expense data still lives in the local SQLite database.
+final messCloudServiceProvider = Provider<MessCloudService>(
+  (ref) => MessCloudService(),
+);
+
+/// The mess the signed-in person belongs to, or null when they have none.
+///
+/// A FutureProvider because membership is now a single document read rather than
+/// a query. Bumped by [activeMessIdProvider] so a sign-out or a fresh sign-in
+/// re-reads it under the new account.
+final activeMessProvider = FutureProvider<Mess?>((ref) async {
+  ref.watch(activeMessIdProvider);
+  ref.watch(currentUserProvider);
+  final user = ref.watch(currentUserProvider).valueOrNull;
+  if (user == null) return null;
+  return ref.watch(messCloudServiceProvider).resolveMess(user.uid);
+});
+
+/// Which mess is currently open. Null until one is chosen or created.
+///
+/// Doubles as a generation counter: setting it forces the membership read above
+/// to run again, which is how a sign-out stops showing the last account's mess.
+final activeMessIdProvider = StateProvider<String?>((ref) => null);
+
+/// People in the open mess.
+///
+/// Taken from the mess document itself, so members see everyone rather than an
+/// empty list. Named to avoid clashing with the local SQLite membersProvider,
+/// which is a different list for a different purpose.
+final messMembersProvider = Provider<List<MessMember>>((ref) {
+  return ref.watch(activeMessProvider).valueOrNull?.members ?? const [];
+});
+
+/// Role of the signed-in person in the open mess, or null when no mess is
+/// open yet.
+final myRoleProvider = Provider<MessRole?>((ref) {
+  final mess = ref.watch(activeMessProvider).valueOrNull;
+  if (mess == null) return null;
+  return mess.isOwner ? MessRole.owner : MessRole.member;
+});
+
+/// Whoever is signed in right now, or null when signed out.
+final currentUserProvider = StreamProvider<AppUser?>(
+  (ref) => ref.watch(authServiceProvider).authStateChanges,
+);
 
 // ---------- Settings ----------
 

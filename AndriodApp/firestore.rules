@@ -1,0 +1,104 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Google does not normalise the case of an address, and Firebase hands the
+    // token email back exactly as the account stores it. Memberships are keyed
+    // by the lowercased address, so both sides must lowercase or they will
+    // silently fail to match: "Ali@x.com" would look like a stranger.
+    function myEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function membershipPath() {
+      return /databases/$(database)/documents/memberships/$(myEmail());
+    }
+
+    // ---- creators -------------------------------------------------------
+    // Approved to run a mess. Added externally, never from the app.
+    // Reads the caller's own entry only.
+    match /creators/{email} {
+      allow read: if isSignedIn() && email == myEmail();
+      allow write: if false;
+    }
+
+    function isApprovedCreator() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/creators/$(myEmail()));
+    }
+
+    // A membership exists once the person has joined any mess. This is the single
+    // source of truth for "do they already have one", replacing the separate
+    // profile collection.
+    function hasMembership() {
+      return isSignedIn() && exists(membershipPath());
+    }
+
+    function isOwnerOfMess(messId) {
+      return hasMembership()
+        && get(membershipPath()).data.messId == messId
+        && get(membershipPath()).data.role == 'owner';
+    }
+
+    function isMemberOfMess(messId) {
+      return hasMembership() && get(membershipPath()).data.messId == messId;
+    }
+
+    // ---- memberships ----------------------------------------------------
+    // One document per person, keyed by their own email, holding the mess they
+    // belong to and their role in it.
+    //
+    // The document id is the email because a Firebase uid does not exist until
+    // someone signs in, so email is the only identifier available when the owner
+    // invites them.
+    match /memberships/{email} {
+      // A person may read only their own membership.
+      allow read: if isSignedIn() && email == myEmail();
+
+      // Creating your own membership with the owner role is the one case the
+      // app is allowed to make, and only for a mess it just created, identified
+      // by ownerUid. Otherwise only an owner of that mess may add members.
+      allow create: if isSignedIn()
+        && (isApprovedCreator()
+            && request.resource.data.role == 'owner'
+            && request.resource.data.messId is string
+            && get(/databases/$(database)/documents/messes/$(request.resource.data.messId)).data.ownerUid
+               == request.auth.uid)
+        || (request.resource.data.role == 'member'
+            && request.resource.data.messId is string
+            && isOwnerOfMess(request.resource.data.messId));
+
+      // Only an owner may change an existing membership, and never to promote
+      // someone: the role and the mess are both immutable.
+      allow update: if isOwnerOfMess(resource.data.messId)
+        && resource.data.role == resource.data.role
+        && resource.data.messId == resource.data.messId;
+
+      allow delete: if isOwnerOfMess(resource.data.messId);
+    }
+
+    // ---- messes ---------------------------------------------------------
+    match /messes/{messId} {
+      // Create requires creator approval and no existing membership, so one
+      // account cannot end up running two messes.
+      allow create: if isApprovedCreator()
+        && !hasMembership()
+        && request.resource.data.ownerUid == request.auth.uid;
+
+      // Owners have full management control. The members roster lives on this
+      // document, so reading the mess also reveals who is in it.
+      allow read, update, delete: if isOwnerOfMess(messId);
+
+      // Members get restricted visibility: they may read the mess and its roster,
+      // but change nothing. Only the owner can add or remove people.
+      match /{document=**} {
+        allow read: if isMemberOfMess(messId);
+        allow write: if false;
+      }
+    }
+  }
+}

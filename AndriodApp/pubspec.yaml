@@ -46,6 +46,15 @@ dependencies:
   flutter_local_notifications: ^19.5.0
   timezone: ^0.10.1
 
+  # Google sign-in, foundation for the shared mess. Identity only for now:
+  # data stays in the local SQLite database until the cloud step.
+  firebase_core: ^3.15.2
+  firebase_auth: ^5.7.0
+  google_sign_in: ^7.2.0
+
+  # Shared mess documents: who owns which mess, and who belongs to it.
+  cloud_firestore: ^5.6.12
+
   # Report charts (PRD 8)
   fl_chart: ^0.69.0
 
