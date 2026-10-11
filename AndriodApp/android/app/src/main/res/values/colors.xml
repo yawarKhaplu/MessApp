@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- MessApp brand colours, mirrored from lib/ui/theme.dart. -->
+<resources>
+    <color name="mess_primary">#FFE65100</color>
+    <color name="mess_primary_dark">#FFAC1900</color>
+    <color name="mess_background">#FFF8F7F4</color>
+    <color name="mess_white">#FFFFFFFF</color>
+</resources>

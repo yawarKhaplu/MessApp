@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 21-30 splash: warm brand background with the house mark centred.
+     Must mirror drawable/launch_background.xml, because this -v21 variant
+     takes precedence on every modern device. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/mess_background" />
+
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/ic_mess_logo" />
+    </item>
+</layer-list>
