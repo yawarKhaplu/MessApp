@@ -1,12 +1,19 @@
 @echo off
 REM ============================================================
-REM  MessApp - build and install on the phone in one step
+REM  MessApp Dev - build and install on the phone in one step
 REM  Usage:  install.bat            (debug build, fast)
 REM          install.bat release    (smaller, slower, no logs)
+REM
+REM  Sandbox build: application id com.messapp.dev, so it installs
+REM  alongside the real MessApp without touching its data.
 REM ============================================================
 
 setlocal
-cd /d "D:\AndriodFlutter\opencode\MessApp"
+REM Always work from this script's own folder, whatever it is called from.
+cd /d "%~dp0"
+
+set "PACKAGE=com.messapp.dev"
+set "APPNAME=MessApp Dev"
 
 set "JAVA_HOME=C:\tools\jdk-17"
 set "ANDROID_HOME=C:\Android\Sdk"
@@ -40,19 +47,20 @@ adb install -r -d "%APK%"
 if errorlevel 1 (
   echo.
   echo INSTALL FAILED. If it says a signature conflict, run:
-  echo    adb uninstall com.messapp.messapp
+  echo    adb uninstall %PACKAGE%
   echo then run this script again.
   pause
   exit /b 1
 )
 
 echo.
-echo === 4/4  Launching MessApp ===
-adb shell monkey -p com.messapp.messapp -c android.intent.category.LAUNCHER 1 >nul 2>&1
-adb shell am start -n com.messapp.messapp/.MainActivity >nul 2>&1
+echo === 4/4  Launching %APPNAME% ===
+adb shell monkey -p %PACKAGE% -c android.intent.category.LAUNCHER 1 >nul 2>&1
+adb shell am start -n %PACKAGE%/.MainActivity >nul 2>&1
 
 echo.
 echo ============================================================
-echo  DONE - MessApp is installed and open on your phone.
+echo  DONE - %APPNAME% is installed and open on your phone.
+echo  Your real MessApp and its records are untouched.
 echo ============================================================
 pause

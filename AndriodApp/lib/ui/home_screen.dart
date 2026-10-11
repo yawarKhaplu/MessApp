@@ -152,7 +152,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('MessApp',
+                    Text('MessAppDev',
                         style: Theme.of(context).textTheme.titleLarge),
                     Text(DateFormat('EEEE, d MMMM').format(DateTime.now()),
                         style: Theme.of(context).textTheme.bodySmall),

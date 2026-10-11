@@ -1,4 +1,4 @@
-package com.messapp.messapp
+package com.messapp.dev
 
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -19,7 +19,7 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
                 if (call.method == "getTimeZoneId") {
-                    result.success(TimeZone.getDefault().id)
+                    result.success(TimeZone.getDefault().getID())
                 } else {
                     result.notImplemented()
                 }
@@ -27,6 +27,8 @@ class MainActivity : FlutterActivity() {
     }
 
     private companion object {
-        const val CHANNEL = "messapp/timezone"
+        // Namespaced per app, so the sandbox and the real app register
+        // separate channels.
+        const val CHANNEL = "messapp/dev/timezone"
     }
 }

@@ -18,7 +18,8 @@ class NotificationService {
   static const String _channelName = 'Daily mess reminder';
   static const String _channelDescription =
       "Reminds you to add today's mess expense";
-  static const _timezoneChannel = MethodChannel('messapp/timezone');
+  // Must match the channel registered in MainActivity.kt.
+  static const _timezoneChannel = MethodChannel('messapp/dev/timezone');
 
   final _plugin = FlutterLocalNotificationsPlugin();
 
@@ -119,7 +120,7 @@ class NotificationService {
   Future<void> showTestNotification() async {
     await _plugin.show(
       9999,
-      'MessApp',
+      'MessAppDev',
       "Notifications are working. Reminder: don't forget today's mess expense.",
       const NotificationDetails(
         android: AndroidNotificationDetails(
@@ -206,7 +207,7 @@ class NotificationService {
     try {
       await _plugin.zonedSchedule(
         _dailyReminderId,
-        'MessApp',
+        'MessAppDev',
         "Please add today's mess expense.",
         scheduled,
         details,

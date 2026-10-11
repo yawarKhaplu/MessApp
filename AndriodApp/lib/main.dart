@@ -31,7 +31,7 @@ class MessApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return MaterialApp(
-      title: 'MessApp',
+      title: 'MessAppDev',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
       home: const HomeShell(),

@@ -196,7 +196,7 @@ class SettingsScreen extends ConsumerWidget {
               child: ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(Icons.home_rounded, color: AppTheme.primary, size: 28),
-                title: Text('MessApp'),
+                title: Text('MessAppDev'),
                 subtitle: Text('Version 1.0.0 · All data stays on this phone'),
               ),
             ),
@@ -369,9 +369,9 @@ class _PermissionCardState extends State<_PermissionCard> {
           const SizedBox(height: 6),
           Text(
             blocked
-                ? 'MessApp cannot remind you until notifications are turned '
+                ? 'MessAppDev cannot remind you until notifications are turned '
                     'on for this app.'
-                : 'The daily reminder will arrive even when MessApp is closed.',
+                : 'The daily reminder will arrive even when MessAppDev is closed.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 12),
