@@ -706,6 +706,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                   email: myEmail,
                                   recordedBy: e.recordedBy ?? '',
                                 ),
+
+                            // Name from the shared roster, so the row reads
+                            // "Akbar" rather than the front of his address.
+                            cookName: mess == null
+                                ? null
+                                : _nameOf(mess.members, e.cookEmail),
                             onChanged: () {
                               ref.invalidate(
                                   sharedExpensesProvider(monthOfToday));
@@ -898,6 +904,37 @@ String _nextTurnHint(MessTurn turn, String? email) {
 /// Best available name for someone in the roster.
 String _who(MessMember member) => member.name ?? member.email;
 
+/// Looks a person up in the shared roster by address.
+///
+/// Matched on the lowercased address because that is how the roster and an
+/// entry's cookEmail are both stored.
+///
+/// A member added without a real name has their address stored in the name
+/// field, which would otherwise put "yawarsdocument@gmail.com" on a card meant
+/// for "Yawar". Those cases fall back to the part before the @, which is short
+/// enough to read and is what the turn chips already show.
+///
+/// Returns null only when the address is not in the roster at all — somebody
+/// removed since cooking — so the caller can decide on its own fallback rather
+/// than being handed a blank.
+String? _nameOf(List<MessMember> roster, String email) {
+  final lower = email.trim().toLowerCase();
+  if (lower.isEmpty) return null;
+
+  for (final m in roster) {
+    if (m.email.trim().toLowerCase() != lower) continue;
+
+    final name = (m.name ?? '').trim();
+    if (name.isEmpty) return null;
+
+    // The name is really just the address again, so it is not a name.
+    if (name.contains('@') || name.toLowerCase() == lower) return null;
+
+    return name;
+  }
+  return null;
+}
+
 /// Rotation progress dots: filled = already had their turn this round,
 /// outlined = still waiting.
 class _TurnDots extends StatelessWidget {
@@ -931,25 +968,31 @@ class _TurnDots extends StatelessWidget {
 
 /// A single shared entry for today.
 ///
-/// Everyone can see it. Only the owner can tap through to edit, because a
-/// correction changes what the mess owes — and the rules refuse a member's edit
-/// even if the tap were reachable.
+/// Visible to everyone in the mess. Editable by the admin on any entry, and by
+/// the turn member only on an entry they recorded themselves.
 class _TodayEntryTile extends StatelessWidget {
   final CloudExpense entry;
   final NumberFormat money;
   final bool canEdit;
   final VoidCallback onChanged;
 
+  /// Name to show for whoever cooked, taken from the shared roster.
+  final String? cookName;
+
   const _TodayEntryTile({
     required this.entry,
     required this.money,
     required this.canEdit,
     required this.onChanged,
+    this.cookName,
   });
 
   @override
   Widget build(BuildContext context) {
-    final cookName = entry.cookEmail.split('@').first;
+    // Falls back to the address's local part so the row is never blank, but the
+    // roster's name is preferred: "Akbar" rather than "akbar.baltim".
+    final cook = (cookName ?? entry.cookEmail.split('@').first).trim();
+    final showCook = cook.isNotEmpty;
 
     return AppCard(
       onTap: canEdit
@@ -991,17 +1034,19 @@ class _TodayEntryTile extends StatelessWidget {
                     Text('Saved',
                         style: TextStyle(
                             fontSize: 12, color: AppTheme.success)),
-                    const SizedBox(width: 8),
-                    Icon(Icons.person,
-                        size: 12, color: AppTheme.textSecondary),
-                    const SizedBox(width: 3),
-                    Flexible(
-                      child: Text(cookName,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 12,
-                              color: AppTheme.textSecondary)),
-                    ),
+                    if (showCook) ...[
+                      const SizedBox(width: 8),
+                      Icon(Icons.person,
+                          size: 12, color: AppTheme.textSecondary),
+                      const SizedBox(width: 3),
+                      Flexible(
+                        child: Text(cook,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 12,
+                                color: AppTheme.textSecondary)),
+                      ),
+                    ],
                   ],
                 ),
               ],
