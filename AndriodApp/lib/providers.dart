@@ -232,12 +232,12 @@ final canRecordTodaysCookProvider = Provider<bool>((ref) {
   final mess = ref.watch(activeMessProvider).valueOrNull;
   if (mess == null) return false;
 
-  if (mess.isOwner) return true;
-
-  final email = ref.watch(currentUserProvider).valueOrNull?.email;
-  if (email == null || email.trim().isEmpty) return false;
-
-  return mess.turn.isTodayFor(email);
+  return mayRecordExpense(
+    mess: mess,
+    email: ref.watch(currentUserProvider).valueOrNull?.email,
+    cookEmail: mess.turn.today?.email ?? '',
+    date: dayKey(DateTime.now()),
+  );
 });
 
 // ---------- Expenses (shared) ----------
@@ -255,14 +255,23 @@ final sharedExpensesProvider =
 
 /// Today's entries, newest first.
 final todayExpensesProvider = Provider<List<CloudExpense>>((ref) {
-  final month = monthKey(DateTime.now());
-  return ref.watch(sharedExpensesProvider(month)).valueOrNull ??
+  // Read the month the provider partitions on, then keep only today. Returning
+  // the whole month here would make every "today" figure in the app a month
+  // figure, and the name would be lying about it.
+  final today = dayKey(DateTime.now());
+  final monthEntries = ref
+          .watch(sharedExpensesProvider(monthKey(DateTime.now())))
+          .valueOrNull ??
       const <CloudExpense>[];
+
+  return monthEntries.where((e) => e.date == today).toList();
 });
 
 /// Today's spending, for the budget figures on Home.
 final todayExpenseTotalProvider = Provider<double>((ref) {
-  final today = monthKey(DateTime.now());
+  // A day, not a month: comparing against a month key would sum the whole month
+  // and report it as today's spending.
+  final today = dayKey(DateTime.now());
   final all = ref.watch(sharedExpensesProvider(monthKey(DateTime.now())))
       .valueOrNull ??
       const <CloudExpense>[];
@@ -270,6 +279,12 @@ final todayExpenseTotalProvider = Provider<double>((ref) {
 });
 
 /// Records a meal. Owner, or the member whose turn it is.
+///
+/// The turn is checked again here, and not only where the button is hidden.
+/// A hidden button is a courtesy: the screen can still be reached by a restored
+/// navigation stack, or left open from yesterday with today's date already
+/// filled in. Re-checking at the point of writing means the rule holds however
+/// the screen was arrived at, instead of only along the path the UI offers.
 Future<String> saveExpense({
   required WidgetRef ref,
   required String date,
@@ -280,6 +295,31 @@ Future<String> saveExpense({
   final mess = ref.read(activeMessProvider).valueOrNull;
   if (mess == null) {
     throw const CloudMessage('No mess is open yet.');
+  }
+
+  final email = ref.read(currentUserProvider).valueOrNull?.email;
+
+  // Checked at the point of writing, not only where the button is hidden. A
+  // hidden button is a courtesy: the screen can still be reached by a restored
+  // navigation stack, or left open from yesterday with today's date already
+  // filled in. Re-checking here means the rule holds however the screen was
+  // arrived at, instead of only along the path the UI offers.
+  final refusal = recordRefusal(
+    mess: mess,
+    email: email,
+    cookEmail: cookEmail,
+    date: date,
+  );
+  if (refusal != null) {
+    final cook = mess.turn.today?.name;
+    throw CloudMessage(switch (refusal) {
+      RecordRefusal.notSignedIn => 'Sign in again to record a meal.',
+      RecordRefusal.notTheirCook =>
+        'You can only record a meal for your own cooking turn.',
+      RecordRefusal.notTheirTurn => cook == null
+          ? 'It is not your turn today.'
+          : 'It is not your turn today — $cook is cooking.',
+    });
   }
 
   final id = await ref.read(messCloudServiceProvider).addExpense(

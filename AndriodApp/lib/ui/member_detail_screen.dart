@@ -152,7 +152,7 @@ class _MemberDetailScreenState extends ConsumerState<MemberDetailScreen> {
             email: _email,
             month: _month,
             amount: amount,
-            date: monthKey(date),
+            date: dayKey(date),
           );
     } on CloudMessage catch (e) {
       if (mounted) {

@@ -615,7 +615,7 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
         try {
           await saveExpense(
             ref: ref,
-            date: monthKey(_date),
+            date: dayKey(_date),
             menuName: _menu?.name ?? 'Entry',
             cookEmail: cook,
             items: [

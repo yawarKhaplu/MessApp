@@ -129,6 +129,123 @@ class MessTurn {
   }
 }
 
+/// Why someone may not record an expense, or null when they may.
+///
+/// A distinct value per reason rather than a bare yes/no, because the message
+/// shown is the useful part: telling someone it is not their turn without saying
+/// whose it is leaves them with nothing to do about it.
+enum RecordRefusal {
+  notSignedIn,
+  notTheirTurn,
+  notTheirCook,
+}
+
+/// Today as `yyyy-MM-dd`, matched against the `date` a meal is filed under.
+///
+/// Written out here rather than imported from the data models: the shared layer
+/// must not depend on the local models it is replacing, or moving a feature out
+/// of SQLite would never actually remove it.
+String _dayKey(DateTime d) {
+  final m = d.month.toString().padLeft(2, '0');
+  final day = d.day.toString().padLeft(2, '0');
+  return '${d.year}-$m-$day';
+}
+
+/// Decides whether [email] may record a meal for [cookEmail] on [date].
+///
+/// One function rather than a check written at each use, so the button and the
+/// save cannot drift apart — a screen can be reached without passing the button,
+/// and a rule that only guards the button is no rule at all.
+///
+/// The owner may record anything, for anyone. A member may record a meal only
+/// when they are the turn member — the person whose bari it is today — and only
+/// their own entry: without that second half the check would be satisfied by
+/// nominating somebody else as the cook.
+RecordRefusal? recordRefusal({
+  required Mess mess,
+  required String? email,
+  required String cookEmail,
+  required String date,
+}) {
+  if (mess.isOwner) return null;
+
+  final lower = (email ?? '').trim().toLowerCase();
+  if (lower.isEmpty) return RecordRefusal.notSignedIn;
+
+  if (cookEmail.trim().toLowerCase() != lower) {
+    return RecordRefusal.notTheirCook;
+  }
+
+  // Only today is recordable by the turn member, meaning the person whose bari
+  // it is. Backdating a meal would let somebody rebuild a round they did not
+  // cook.
+  final today = _dayKey(DateTime.now());
+  if (date.trim() != today) return RecordRefusal.notTheirTurn;
+
+  if (!mess.turn.isTodayFor(lower)) return RecordRefusal.notTheirTurn;
+
+  return null;
+}
+
+/// The plain yes/no form of [recordRefusal], for gating a control.
+bool mayRecordExpense({
+  required Mess mess,
+  required String? email,
+  required String cookEmail,
+  required String date,
+}) =>
+    recordRefusal(
+      mess: mess,
+      email: email,
+      cookEmail: cookEmail,
+      date: date,
+    ) ==
+    null;
+
+/// Who may edit or delete a shared entry.
+///
+/// The owner may change any of them — a correction changes what the mess owes,
+/// and the owner is the one answerable for that.
+///
+/// The turn member, meaning the person whose bari it is today, may change only
+/// the entries they recorded themselves. Being on turn is not enough on its own:
+/// without the second half, whoever happens to be cooking could rewrite a meal
+/// somebody else entered, which is precisely the thing the turn exists to
+/// prevent.
+///
+/// Everyone else may read but not change. The rules enforce the same shape
+/// independently, so this is the app agreeing with the server rather than
+/// substituting for it.
+bool mayEditExpense({
+  required Mess mess,
+  required String? email,
+  required String recordedBy,
+}) {
+  if (mess.isOwner) return true;
+
+  final lower = (email ?? '').trim().toLowerCase();
+  if (lower.isEmpty) return false;
+
+  if (recordedBy.trim().toLowerCase() != lower) return false;
+
+  return mess.turn.isTodayFor(lower);
+}
+
+/// Checks that [date] is a full `yyyy-MM-dd` day.
+///
+/// The app has both a month key and a day key and they differ by three
+/// characters, so passing the wrong one compiles, saves without complaint, and
+/// quietly files every entry in a month under the first day of it. Rejecting a
+/// short key at the write boundary turns that class of mistake into an error
+/// rather than a mess's history quietly rearranging itself.
+bool _isDayKey(String date) =>
+    date.length == 10 &&
+    date[4] == '-' &&
+    date[7] == '-' &&
+    int.tryParse(date.substring(0, 4)) != null &&
+    int.tryParse(date.substring(5, 7)) != null &&
+    int.tryParse(date.substring(8, 10)) != null;
+
 /// A mess the signed-in person belongs to.
 class Mess {
   final String id;
@@ -714,6 +831,10 @@ class MessCloudService {
     final uid = _user?.uid;
     if (uid == null) throw const CloudMessage('Sign in again.');
 
+    if (!_isDayKey(date)) {
+      throw const CloudMessage('That date is not a day, so it was not saved.');
+    }
+
     final total = items.fold<double>(0, (s, i) => s + i.lineTotal);
     final ref = _db.collection('$_messes/$messId/expenses').doc();
 
@@ -752,6 +873,10 @@ class MessCloudService {
     required String cookEmail,
     required List<CloudExpenseItem> items,
   }) async {
+    if (!_isDayKey(date)) {
+      throw const CloudMessage('That date is not a day, so it was not saved.');
+    }
+
     final total = items.fold<double>(0, (s, i) => s + i.lineTotal);
     try {
       await _db.collection('$_messes/$messId/expenses').doc(expenseId).set({

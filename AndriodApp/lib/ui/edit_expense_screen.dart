@@ -253,13 +253,13 @@ String? _cookName(BuildContext context) {
       await ref.read(messCloudServiceProvider).updateExpense(
         messId: mess.id,
         expenseId: widget.entry.id,
-        date: monthKey(_date),
+        date: dayKey(_date),
         menuName: widget.entry.menuName,
         cookEmail: _cookEmail ?? widget.entry.cookEmail,
         items: entries,
       );
       ref.invalidate(sharedExpensesProvider(monthOf(widget.entry.date)));
-      ref.invalidate(sharedExpensesProvider(monthOf(monthKey(_date))));
+      ref.invalidate(sharedExpensesProvider(monthOf(dayKey(_date))));
     } on CloudMessage catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)

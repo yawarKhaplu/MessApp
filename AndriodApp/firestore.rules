@@ -112,9 +112,14 @@ service cloud.firestore {
         //
         // A member may record a meal, but only one attributed to themselves and
         // only dated roughly today, which stops one member logging meals under
-        // another's name. What this cannot do is check the cooking turn: that
-        // arithmetic is not expressible as a provable rule, so the app only offers
-        // the screen on the person's own turn.
+        // another's name.
+        //
+        // What this cannot do is check the cooking turn. Deriving the turn needs
+        // a date subtraction from an anchor, and rules cannot turn request.time
+        // into a calendar date, so "is it my turn today" is not expressible here.
+        // The app enforces that instead, at the point of saving rather than only
+        // where the button is drawn, so a member cannot reach the write by any
+        // path the UI does not offer.
         allow create: if isOwnerOfMess(messId)
           || (isMemberOfMess(messId)
               && request.resource.data.cookEmail
@@ -123,11 +128,36 @@ service cloud.firestore {
               && request.resource.data.dateTime
                    >= request.time - duration.value(1, 'd'));
 
-        // Editing is the owner's alone: a correction changes what the mess owes,
-        // which the member being corrected has no business doing.
-        allow update: if isOwnerOfMess(messId);
+        // Editing. The owner may change anything; a correction changes what the
+        // mess owes and the owner is answerable for that.
+        //
+        // The turn member may correct only an entry they recorded themselves.
+        // Being on turn is not checkable here, so the app applies that half, but
+        // "my own entry" is, and without it whoever is cooking could rewrite a
+        // meal somebody else entered — the exact thing the turn prevents.
+        //
+        // Three fields are pinned so the permission cannot be laundered into
+        // ownership of the record: recordedBy cannot be changed to match
+        // somebody else, visibleTo cannot be widened to read more of the mess's
+        // history, and the date cannot be moved off today. Rules that do not
+        // mention a field permit it to change, so each one has to be named.
+        allow update: if isOwnerOfMess(messId)
+          || (isMemberOfMess(messId)
+              && resource.data.recordedBy == request.auth.token.email.lower()
+              && request.resource.data.recordedBy
+                   == request.auth.token.email.lower()
+              && request.resource.data.visibleTo == resource.data.visibleTo
+              && request.resource.data.dateTime <= request.time
+              && request.resource.data.dateTime
+                   >= request.time - duration.value(1, 'd'));
 
-        allow delete: if isOwnerOfMess(messId);
+        // Removing follows the same split: the owner may remove any entry, and
+        // the turn member only one of their own. An entry nobody may delete is
+        // an entry nobody can take back, so this mirrors update rather than
+        // being owner-only.
+        allow delete: if isOwnerOfMess(messId)
+          || (isMemberOfMess(messId)
+              && resource.data.recordedBy == request.auth.token.email.lower());
       }
 
       // Monthly collections and the payments against them.

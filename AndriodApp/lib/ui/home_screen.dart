@@ -126,6 +126,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final canRecordCook = ref.watch(canRecordTodaysCookProvider);
     final turn = ref.watch(messTurnProvider);
 
+    // Needed to decide who recorded each entry, which is what separates the
+    // owner's edit from the turn member's.
+    final myEmail = ref.watch(currentUserProvider).valueOrNull?.email;
+
     return Scaffold(
       body: SafeArea(
         // No AppBar on this tab, and Android 15 draws edge-to-edge, so the
@@ -644,8 +648,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
             // Today's entries, read from Firestore so the whole mess sees the same list.
             Builder(builder: (context) {
-              final today = monthKey(DateTime.now());
-              final all = ref.watch(sharedExpensesProvider(today));
+              // Two different keys on purpose: the provider is queried by month
+              // because that is how expenses are partitioned, while the entries
+              // kept from it are filtered by day because that is what "today"
+              // means. Using one for both silently returns the wrong set.
+              //
+              // Named apart from the callback's own parameter below, because a
+              // shadowed name here silently becomes the list rather than the
+              // key, and the wrong one is a compile error that only a build
+              // catches.
+              final monthOfToday = monthKey(DateTime.now());
+              final today = dayKey(DateTime.now());
+              final all = ref.watch(sharedExpensesProvider(monthOfToday));
               return all.when(
                 loading: () => const Padding(
                   padding: EdgeInsets.all(16),
@@ -656,9 +670,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   child: Text('Could not load entries: $e',
                       style: Theme.of(context).textTheme.bodySmall),
                 ),
-                data: (month) {
+                data: (entriesInMonth) {
                   final entries =
-                      month.where((e) => e.date == today).toList();
+                      entriesInMonth.where((e) => e.date == today).toList();
                   if (entries.isEmpty) return const SizedBox.shrink();
 
                   return Column(
@@ -680,9 +694,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           child: _TodayEntryTile(
                             entry: e,
                             money: money,
-                            canEdit: isOwner,
+
+                            // Decided per entry, not once for the list: the
+                            // owner may change any of them, but the turn member
+                            // may change only the ones they recorded. One flag
+                            // for the whole list would have to be the stricter of
+                            // the two, which would hide the owner's edit.
+                            canEdit: mess != null &&
+                                mayEditExpense(
+                                  mess: mess,
+                                  email: myEmail,
+                                  recordedBy: e.recordedBy ?? '',
+                                ),
                             onChanged: () {
-                              ref.invalidate(sharedExpensesProvider(today));
+                              ref.invalidate(
+                                  sharedExpensesProvider(monthOfToday));
                               _refresh();
                             },
                           ),
@@ -852,14 +878,19 @@ String _nextTurnHint(MessTurn turn, String? email) {
       // Days measured from today rather than from the list, so the wording does
       // not depend on where in the preview the day happens to fall.
       final days = entry.date.difference(startOfToday).inDays;
-      if (days <= 0) {
-        return 'It is not your turn today — ${_who(today)} is cooking.';
-      }
+
+      // Only a day still ahead is somebody else's problem. Zero days is today,
+      // which is the one case where the button *is* showing, so it must not be
+      // described as "not your turn".
+      if (days <= 0) continue;
+
       if (days == 1) return 'Your turn is tomorrow.';
       return 'Your turn is in $days days.';
     }
   }
 
+  // Either it is somebody else's turn today, or their turn has fallen outside
+  // the preview. Both read the same to the person waiting: it is not today.
   return 'Today is ${_who(today)}. '
       'You can record what was cooked on your turn.';
 }
