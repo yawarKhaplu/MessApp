@@ -6,6 +6,7 @@ import 'services/auth_service.dart';
 import 'services/collection_cloud_service.dart';
 import 'services/expense_cloud_service.dart';
 import 'services/mess_cloud_service.dart';
+import 'services/other_expense_cloud_service.dart';
 import 'services/menu_cloud_service.dart';
 import 'services/notifications.dart';
 
@@ -336,6 +337,114 @@ Future<String> saveExpense({
   ref.invalidate(sharedExpensesProvider(monthOf(date)));
   ref.invalidate(sharedExpensesProvider(monthKey(DateTime.now())));
   return id;
+}
+
+// ---------- Other expenses (shared) ----------
+
+/// Other expenses for one month, read from Firestore.
+///
+/// Owner-only writes, so every member reads the whole month and the same list is
+/// returned for all of them. Invalidated on any write so the owner who records
+/// one sees it without pulling to refresh.
+final otherExpensesProvider =
+    FutureProvider.autoDispose.family<List<CloudOtherExpense>, String>(
+        (ref, month) async {
+  final mess = await ref.watch(activeMessProvider.future);
+  if (mess == null) return const [];
+  return ref.read(messCloudServiceProvider).otherExpenses(mess.id, month);
+});
+
+/// Other expense categories with their allowances, from the mess document.
+final otherCategoriesProvider =
+    FutureProvider.autoDispose.family<List<CloudOtherCategory>, String>(
+        (ref, messId) async {
+  if (messId.isEmpty) return const [];
+  return ref.read(messCloudServiceProvider).otherCategories(messId);
+});
+
+/// Categories with what has been spent against each one this month.
+///
+/// The spend is worked out from the entries rather than read from a stored
+/// running total, so the figure can never drift away from the records it came
+/// from — a category that looks unspent while the entries say otherwise would
+/// quietly overstate what is left.
+final categoryBudgetsProvider =
+    FutureProvider.autoDispose.family<List<CloudCategoryBudget>, DateTime>(
+        (ref, month) async {
+  final mess = await ref.watch(activeMessProvider.future);
+  if (mess == null) return const [];
+
+  final key = monthKey(month);
+  final bounds = monthBounds(key);
+  final service = ref.read(messCloudServiceProvider);
+
+  final categories = await service.otherCategories(mess.id);
+  final expenses = await service.otherExpenses(mess.id, key);
+
+  return [
+    for (final c in categories)
+      CloudCategoryBudget(
+        c,
+        spentInCategory(expenses, c.name, bounds.from, bounds.to),
+      ),
+  ];
+});
+
+/// Records or updates an other expense. Owner only.
+Future<void> saveOtherExpense({
+  required WidgetRef ref,
+  required String date,
+  required String category,
+  required double amount,
+  String? note,
+  String? title,
+  String? id,
+}) async {
+  final mess = ref.read(activeMessProvider).valueOrNull;
+  if (mess == null) throw const CloudMessage('No mess is open yet.');
+
+  // Checked here rather than only where the button is drawn: a hidden button is
+  // a courtesy, and this screen can still be reached by a restored navigation
+  // stack. The rules refuse the write either way, so this is agreeing with the
+  // server rather than substituting for it.
+  if (!mess.isOwner) {
+    throw const CloudMessage('Only the owner can add other expenses.');
+  }
+
+  await ref.read(messCloudServiceProvider).addOtherExpense(
+        messId: mess.id,
+        date: date,
+        category: category,
+        amount: amount,
+        note: note,
+        title: title,
+        id: id,
+      );
+
+  ref.invalidate(otherExpensesProvider(monthOf(date)));
+  ref.invalidate(categoryBudgetsProvider(DateTime.parse(date)));
+  ref.invalidate(activeMessProvider);
+}
+
+/// Removes an other expense. Owner only.
+Future<void> deleteOtherExpense({
+  required WidgetRef ref,
+  required String month,
+  required String id,
+}) async {
+  final mess = ref.read(activeMessProvider).valueOrNull;
+  if (mess == null) throw const CloudMessage('No mess is open yet.');
+
+  if (!mess.isOwner) {
+    throw const CloudMessage('Only the owner can remove other expenses.');
+  }
+
+  await ref
+      .read(messCloudServiceProvider)
+      .deleteOtherExpense(messId: mess.id, month: month, id: id);
+
+  ref.invalidate(otherExpensesProvider(month));
+  ref.invalidate(activeMessProvider);
 }
 
 // ---------- Members ----------

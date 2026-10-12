@@ -50,6 +50,13 @@ class CloudOtherExpense {
         createdAt: (data['createdAt'] as Timestamp?)?.toDate(),
       );
 
+  /// The day as a real date, for formatting.
+  ///
+  /// Stored as text so it sorts and compares as a string, which is what the
+  /// ranges in this file rely on. Parsed on demand rather than held, so the
+  /// stored value stays the single source of truth.
+  DateTime get day => DateTime.tryParse(date) ?? DateTime(1970);
+
   Map<String, Object?> toDoc() => {
         'date': date,
         'category': category,

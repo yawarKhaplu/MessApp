@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'collection_cloud_service.dart';
 import 'expense_cloud_service.dart';
 import 'menu_cloud_service.dart';
+import 'other_expense_cloud_service.dart';
 
 /// Roles a person can hold in a mess.
 enum MessRole {
@@ -915,6 +916,346 @@ class MessCloudService {
     } on FirebaseException catch (e) {
       throw CloudMessage(_friendly(e));
     }
+  }
+
+  // ---- Other expenses ----
+
+  /// Every other expense in one month.
+  ///
+  /// Read as a single document keyed by month rather than a query. That is what
+  /// lets the membership check be used here at all: a rule that reads another
+  /// document cannot be proven against a query, but it is fine for a direct read
+  /// of a document whose id the app already knows.
+  ///
+  /// Only the owner writes here, so every member reads the whole month and there
+  /// is nothing to filter per person.
+  Future<List<CloudOtherExpense>> otherExpenses(
+    String messId,
+    String month,
+  ) async {
+    try {
+      final doc = await _db
+          .collection('$_messes/$messId/otherExpenses')
+          .doc(month)
+          .get();
+
+      if (!doc.exists) return const [];
+
+      final raw = Map<dynamic, dynamic>.from(
+          (doc.data()?['entries'] as Map?) ?? const {});
+
+      final list = <CloudOtherExpense>[];
+      for (final e in raw.entries) {
+        if (e.value is! Map) continue;
+        final data =
+            Map<String, dynamic>.from(Map<dynamic, dynamic>.from(e.value as Map));
+        list.add(CloudOtherExpense.fromDoc('${e.key}', data));
+      }
+
+      // Newest day first, then newest entry first within a day, so the order
+      // never depends on map iteration order.
+      list.sort((a, b) {
+        final byDate = b.date.compareTo(a.date);
+        if (byDate != 0) return byDate;
+        return (b.createdAt ?? DateTime(0)).compareTo(a.createdAt ?? DateTime(0));
+      });
+
+      return list;
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Months that hold at least one other expense.
+  ///
+  /// Kept as a list on the mess document because renaming or deleting a
+  /// category has to reach the months that actually hold records, and there is
+  /// no way to ask "which months have data" without a query.
+  Future<List<String>> otherExpenseMonths(String messId) async {
+    try {
+      final doc = await _db.collection(_messes).doc(messId).get();
+      final raw = doc.data()?['otherExpenseMonths'];
+      if (raw is! List) return const [];
+      return [for (final m in raw) '$m'];
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Records another expense. Owner only.
+  ///
+  /// [id] is supplied when editing, so the same row is overwritten instead of a
+  /// second one appearing.
+  Future<String> addOtherExpense({
+    required String messId,
+    required String date,
+    required String category,
+    required double amount,
+    String? note,
+    String? title,
+    String? id,
+  }) async {
+    if (!_isDayKey(date)) {
+      throw const CloudMessage('That date is not a day, so it was not saved.');
+    }
+    if (category.trim().isEmpty) {
+      throw const CloudMessage('Choose a category.');
+    }
+    if (amount <= 0) {
+      throw const CloudMessage('Enter an amount greater than zero.');
+    }
+
+    final month = monthOf(date);
+    final key = id ?? 'o${DateTime.now().microsecondsSinceEpoch}';
+
+    final noteText = (note ?? '').trim();
+    final titleText = (title ?? '').trim();
+
+    final entry = CloudOtherExpense(
+      id: key,
+      date: date,
+      category: category.trim(),
+      amount: amount,
+      note: noteText.isEmpty ? null : noteText,
+      title: titleText.isEmpty ? null : titleText,
+      recordedBy: _myEmail,
+    ).toDoc();
+
+    final ref = _db.collection('$_messes/$messId/otherExpenses').doc(month);
+
+    try {
+      // Written as two steps rather than a merged set of the whole map. A plain
+      // 'entries.<key>' string key inside a set creates a field literally named
+      // "entries.<key>" instead of an entry in the map, so the entry would save
+      // and then read back as empty. A FieldPath is the only way to add one entry
+      // to a map without first reading the whole map.
+      await ref.set({'month': month}, SetOptions(merge: true));
+      await ref.update({FieldPath(['entries', key]): entry});
+
+      await _rememberMonth(messId, month);
+      return key;
+    } on FirebaseException catch (e) {
+      if (e.code == 'permission-denied') {
+        throw const CloudMessage('Only the owner can add other expenses.');
+      }
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Removes an other expense. Owner only.
+  ///
+  /// The month is required because the document is keyed by it and the entry id
+  /// alone does not say where to look.
+  Future<void> deleteOtherExpense({
+    required String messId,
+    required String month,
+    required String id,
+  }) async {
+    try {
+      final ref = _db.collection('$_messes/$messId/otherExpenses').doc(month);
+      final snap = await ref.get();
+
+      // Nothing to remove if the month was never written, rather than failing on
+      // a delete aimed at a document that does not exist.
+      if (!snap.exists) return;
+
+      await ref.update(<Object, Object?>{
+        FieldPath(['entries', id]): FieldValue.delete(),
+      });
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Notes that [month] holds records, so a category rename can find it later.
+  Future<void> _rememberMonth(String messId, String month) async {
+    if ((await otherExpenseMonths(messId)).contains(month)) return;
+
+    await _db.collection(_messes).doc(messId).update({
+      'otherExpenseMonths': FieldValue.arrayUnion([month]),
+    });
+  }
+
+  // ---- Other categories ----
+
+  /// Categories of other expense, with their monthly allowances.
+  ///
+  /// Held on the mess document beside the menu catalogue, so one read covers
+  /// both and they inherit the owner-only write rule already protecting it.
+  Future<List<CloudOtherCategory>> otherCategories(String messId) async {
+    try {
+      final doc = await _db.collection(_messes).doc(messId).get();
+      final raw = Map<dynamic, dynamic>.from(
+          (doc.data()?['otherCategories'] as Map?) ?? const {});
+
+      final list = <CloudOtherCategory>[];
+      for (final e in raw.entries) {
+        list.add(CloudOtherCategory.fromEntry('${e.key}', e.value));
+      }
+
+      list.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      return list;
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Adds a category. Owner only.
+  Future<void> addOtherCategory(String messId, String name) async {
+    final clean = name.trim();
+    if (clean.isEmpty) {
+      throw const CloudMessage('Give the category a name.');
+    }
+
+    try {
+      await _db.collection(_messes).doc(messId).set({
+        'otherCategories': {
+          clean.toLowerCase(): CloudOtherCategory(name: clean).toDoc(),
+        },
+      }, SetOptions(merge: true));
+    } on FirebaseException catch (e) {
+      if (e.code == 'permission-denied') {
+        throw const CloudMessage('Only the owner can change categories.');
+      }
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Sets a category's monthly allowance. Zero clears it.
+  Future<void> setCategoryBudget(
+    String messId,
+    String name,
+    double budget,
+  ) async {
+    final clean = name.trim();
+    if (clean.isEmpty) return;
+
+    try {
+      await _db.collection(_messes).doc(messId).set({
+        'otherCategories': {
+          clean.toLowerCase(): {'name': clean, 'budget': budget},
+        },
+      }, SetOptions(merge: true));
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Renames a category everywhere, including on records already filed under it.
+  ///
+  /// Every month holding a record is rewritten, because a rename that only
+  /// changed the list would leave past spending filed under a name that no longer
+  /// exists — money the mess spent with nothing to account for it.
+  Future<void> renameOtherCategory({
+    required String messId,
+    required String oldName,
+    required String newName,
+  }) async {
+    final from = oldName.trim();
+    final to = newName.trim();
+
+    if (to.isEmpty) {
+      throw const CloudMessage('Give the category a name.');
+    }
+    if (from.toLowerCase() == to.toLowerCase()) return;
+
+    final budget = await _budgetOf(messId, from);
+
+    try {
+      await _db.collection(_messes).doc(messId).set({
+        'otherCategories': {
+          to.toLowerCase(): {'name': to, 'budget': budget},
+        },
+      }, SetOptions(merge: true));
+
+      await _recategorise(messId, from, to);
+
+      // The old key would otherwise linger as a duplicate and the list would show
+      // the same category twice under two names.
+      await _db.collection(_messes).doc(messId).update({
+        FieldPath(['otherCategories', from.toLowerCase()]): FieldValue.delete(),
+      });
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Removes a category.
+  ///
+  /// With [keepRecords] the entries stay and become "Other"; without it they go
+  /// too. Deleting spending is not reversible, so it is a separate decision
+  /// rather than the default.
+  Future<void> deleteOtherCategory({
+    required String messId,
+    required String name,
+    required bool keepRecords,
+  }) async {
+    final key = name.trim().toLowerCase();
+
+    try {
+      if (keepRecords) {
+        await _recategorise(messId, name, 'Other');
+      } else {
+        for (final month in await otherExpenseMonths(messId)) {
+          // A plain string key here, not a FieldPath: set() takes string keys
+          // only. With merge:true the delete sentinel removes the whole map
+          // while leaving the month field alone.
+          await _db
+              .collection('$_messes/$messId/otherExpenses')
+              .doc(month)
+              .set({'entries': FieldValue.delete()},
+                  SetOptions(merge: true));
+        }
+      }
+
+      await _db.collection(_messes).doc(messId).update(<Object, Object?>{
+        FieldPath(['otherCategories', key]): FieldValue.delete(),
+      });
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Rewrites every record filed under [from] so it reads [to].
+  Future<void> _recategorise(
+    String messId,
+    String from,
+    String to,
+  ) async {
+    final wanted = from.trim().toLowerCase();
+
+    for (final month in await otherExpenseMonths(messId)) {
+      final ref = _db.collection('$_messes/$messId/otherExpenses').doc(month);
+      final snap = await ref.get();
+      if (!snap.exists) continue;
+
+      final raw = Map<dynamic, dynamic>.from(
+          (snap.data()?['entries'] as Map?) ?? const {});
+      if (raw.isEmpty) continue;
+
+      final updates = <FieldPath, Object?>{};
+      for (final e in raw.entries) {
+        if (e.value is! Map) continue;
+
+        final data = Map<String, dynamic>.from(
+            Map<dynamic, dynamic>.from(e.value as Map));
+        if ('${data['category']}'.trim().toLowerCase() != wanted) continue;
+
+        updates[FieldPath(['entries', '${e.key}', 'category'])] = to;
+      }
+
+      if (updates.isEmpty) continue;
+      await ref.update(updates);
+    }
+  }
+
+  /// A category's current allowance, read so a rename can carry it over.
+  Future<double> _budgetOf(String messId, String name) async {
+    final wanted = name.trim().toLowerCase();
+    for (final c in await otherCategories(messId)) {
+      if (c.name.trim().toLowerCase() == wanted) return c.budget;
+    }
+    return 0;
   }
 
   // ---- Menu catalogue ----

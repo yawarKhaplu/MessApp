@@ -4,6 +4,9 @@ import 'package:intl/intl.dart';
 
 import '../data/models.dart';
 import '../providers.dart';
+import '../services/expense_cloud_service.dart';
+import '../services/mess_cloud_service.dart';
+import '../services/other_expense_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'other_categories_screen.dart';
@@ -15,7 +18,7 @@ import 'widgets/text_input_dialog.dart';
 /// Pass [editing] to correct an existing record instead of adding a new one —
 /// the same form is used, so amount, category and date can all be fixed.
 class OtherExpenseScreen extends ConsumerStatefulWidget {
-  final OtherExpense? editing;
+  final CloudOtherExpense? editing;
 
   const OtherExpenseScreen({super.key, this.editing});
 
@@ -29,8 +32,8 @@ class _OtherExpenseScreenState extends ConsumerState<OtherExpenseScreen> {
   String? _category;
   late final TextEditingController _amountCtrl;
   List<String> _categories = [];
-  List<OtherExpense> _recent = [];
-  CategoryBudget? _selectedBudget;
+  List<CloudOtherExpense> _recent = [];
+  CloudCategoryBudget? _selectedBudget;
   late bool _editing;
 
   @override
@@ -38,7 +41,9 @@ class _OtherExpenseScreenState extends ConsumerState<OtherExpenseScreen> {
     super.initState();
     final e = widget.editing;
     _editing = e != null;
-    _date = e?.date ?? DateTime.now();
+    // Stored as a yyyy-MM-dd string, so read the parsed day rather than the
+    // raw field: _date is a DateTime for the date picker.
+    _date = e?.day ?? DateTime.now();
     _category = e?.category;
     _amountCtrl = TextEditingController(
         text: e != null && e.amount > 0 ? e.amount.toStringAsFixed(0) : '');
@@ -46,11 +51,20 @@ class _OtherExpenseScreenState extends ConsumerState<OtherExpenseScreen> {
   }
 
   Future<void> _load() async {
-    final repo = ref.read(repositoryProvider);
-    final cats = await repo.getOtherCategories();
-    final recent = await repo.getOtherExpenses();
-    final budgets =
-        await repo.getCategoryBudgets(ref.read(selectedMonthProvider));
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+
+    final service = ref.read(messCloudServiceProvider);
+    final month = ref.read(selectedMonthProvider);
+    final key = monthKey(month);
+    final bounds = monthBounds(key);
+
+    final cats = [
+      for (final c in await service.otherCategories(mess.id)) c.name,
+    ];
+    final recent = await service.otherExpenses(mess.id, key);
+    final budgets = await service.otherCategories(mess.id);
+
     if (mounted) {
       setState(() {
         _categories = cats;
@@ -63,8 +77,13 @@ class _OtherExpenseScreenState extends ConsumerState<OtherExpenseScreen> {
           _category = null;
         }
         _selectedBudget = null;
-        for (final b in budgets) {
-          if (b.category == _category) _selectedBudget = b;
+        for (final c in budgets) {
+          if (c.name == _category) {
+            _selectedBudget = CloudCategoryBudget(
+              c,
+              spentInCategory(recent, c.name, bounds.from, bounds.to),
+            );
+          }
         }
         _recent = recent.where((e) => e.id != widget.editing?.id).take(20).toList();
       });
@@ -83,20 +102,33 @@ class _OtherExpenseScreenState extends ConsumerState<OtherExpenseScreen> {
 
   /// Category chooser as a bottom sheet, with usage and budget progress.
   Future<void> _pickCategory() async {
-    final repo = ref.read(repositoryProvider);
-    final month = ref.read(selectedMonthProvider);
-    final budgets = await repo.getCategoryBudgets(month);
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
 
-    CategoryBudget? budgetFor(String name) {
-      for (final b in budgets) {
-        if (b.category == name) return b;
+    final service = ref.read(messCloudServiceProvider);
+    final key = monthKey(ref.read(selectedMonthProvider));
+    final bounds = monthBounds(key);
+
+    // Usage counted against the selected month, matching the allowance shown
+    // next to it. Counting every month beside a monthly allowance would read as
+    // overspend for anything ever filed under the category.
+    final inMonth = await service.otherExpenses(mess.id, key);
+    final budgets = await service.otherCategories(mess.id);
+
+    CloudCategoryBudget? budgetFor(String name) {
+      for (final c in budgets) {
+        if (c.name != name) continue;
+        return CloudCategoryBudget(
+          c,
+          spentInCategory(inMonth, c.name, bounds.from, bounds.to),
+        );
       }
       return null;
     }
 
     final usage = <String, int>{};
     for (final c in _categories) {
-      usage[c] = await repo.getCategoryUsage(c);
+      usage[c] = inMonth.where((e) => e.category == c).length;
     }
     if (!mounted) return;
 
@@ -198,7 +230,20 @@ class _OtherExpenseScreenState extends ConsumerState<OtherExpenseScreen> {
         ),
       );
       if (name != null && name.trim().isNotEmpty) {
-        await repo.addOtherCategory(name.trim());
+        final mess = ref.read(activeMessProvider).valueOrNull;
+        if (mess == null) return;
+
+        try {
+          await ref
+              .read(messCloudServiceProvider)
+              .addOtherCategory(mess.id, name.trim());
+        } on CloudMessage catch (e) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text(e.text)));
+          return;
+        }
+
         await _load();
         if (mounted) setState(() => _category = name.trim());
       }
@@ -241,28 +286,31 @@ String _categoryStatus(NumberFormat money) {
       return;
     }
 
-    if (_editing && widget.editing?.id != null) {
-      await ref.read(repositoryProvider).updateOtherExpense(
-            id: widget.editing!.id!,
-            date: _date,
-            category: _category!,
-            amount: amount,
-          );
-      await refreshTotals(ref);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$_category updated')),
+    try {
+      // Editing passes the existing id so the same row is overwritten. Saving
+      // without it would leave the original in place and add a second entry for
+      // the same day, so the total would count it twice.
+      await saveOtherExpense(
+        ref: ref,
+        date: dayKey(_date),
+        category: _category!,
+        amount: amount,
+        id: widget.editing?.id,
       );
+    } on CloudMessage catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.text)));
+      return;
+    }
+
+    if (_editing && mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('$_category updated')));
       Navigator.pop(context, true);
       return;
     }
 
-    await ref.read(repositoryProvider).addOtherExpense(
-          date: _date,
-          category: _category!,
-          amount: amount,
-        );
-    await refreshTotals(ref);
     _amountCtrl.clear();
     await _load();
     if (mounted) {
@@ -276,14 +324,14 @@ String _categoryStatus(NumberFormat money) {
 
   Future<void> _delete() async {
     final e = widget.editing;
-    if (e?.id == null) return;
+    if (e == null) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('Delete ${e!.category}?'),
+        title: Text('Delete ${e.category}?'),
         content: Text(
             'Remove ${NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0).format(e.amount)} '
-            'recorded on ${DateFormat.yMMMEd().format(e.date)}?'),
+            'recorded on ${DateFormat.yMMMEd().format(e.day)}?'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -295,8 +343,20 @@ String _categoryStatus(NumberFormat money) {
       ),
     );
     if (ok != true) return;
-    await ref.read(repositoryProvider).deleteOtherExpense(e!.id!);
-    await refreshTotals(ref);
+
+    try {
+      await deleteOtherExpense(
+        ref: ref,
+        month: monthOf(e.date),
+        id: e.id,
+      );
+    } on CloudMessage catch (err) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(err.text)));
+      return;
+    }
+
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(const SnackBar(content: Text('Expense deleted')));
@@ -421,9 +481,20 @@ String _categoryStatus(NumberFormat money) {
                   child: const Icon(Icons.delete, color: AppTheme.error),
                 ),
                 onDismissed: (_) async {
-                  await ref
-                      .read(repositoryProvider)
-                      .deleteOtherExpense(e.id!);
+                  // Swiping the row away removes it for everyone, so a failure
+                  // has to be reported rather than leaving the row gone from the
+                  // screen while it is still in Firestore.
+                  try {
+                    await deleteOtherExpense(
+                      ref: ref,
+                      month: monthOf(e.date),
+                      id: e.id,
+                    );
+                  } on CloudMessage catch (err) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(SnackBar(content: Text(err.text)));
+                  }
                   await _load();
                 },
                 child: Padding(
@@ -458,7 +529,7 @@ String _categoryStatus(NumberFormat money) {
                               Text(e.category,
                                   style: Theme.of(context).textTheme.titleSmall),
                               const SizedBox(height: 2),
-                              Text(DateFormat.yMMMEd().format(e.date),
+                              Text(DateFormat.yMMMEd().format(e.day),
                                   style: Theme.of(context).textTheme.bodySmall),
                             ],
                           ),
@@ -487,7 +558,7 @@ String _categoryStatus(NumberFormat money) {
 class _CategoryChoiceTile extends StatelessWidget {
   final String name;
   final int records;
-  final CategoryBudget? budget;
+  final CloudCategoryBudget? budget;
   final bool selected;
   final NumberFormat money;
   final VoidCallback onTap;

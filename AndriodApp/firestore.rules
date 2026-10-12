@@ -182,6 +182,20 @@ service cloud.firestore {
         allow write: if isOwnerOfMess(messId);
       }
 
+      // Other expenses: gas, rent, chai — spending that is not a meal.
+      //
+      // Keyed by month, one document per month, and always read by its id rather
+      // than queried. That is what lets the membership check appear here at all:
+      // a rule that reads another document cannot be proven against a query, but
+      // a direct read of a document whose id the app already knows is fine.
+      //
+      // Owner-only writes, so every member reads the whole month and there is no
+      // per-person filtering to arrange.
+      match /otherExpenses/{month} {
+        allow read: if isMemberOfMess(messId);
+        allow write: if isOwnerOfMess(messId);
+      }
+
       // Members get restricted visibility: they may read what is inside the
       // mess but change nothing. Only the owner can add or remove people.
       match /{document=**} {

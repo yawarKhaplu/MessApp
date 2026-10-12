@@ -6,6 +6,7 @@ import '../data/models.dart';
 import '../providers.dart';
 import '../services/expense_cloud_service.dart';
 import '../services/mess_cloud_service.dart';
+import '../services/other_expense_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'edit_expense_screen.dart';
@@ -466,11 +467,46 @@ class _DailyTab extends ConsumerWidget {
                 child: AppCard(
                   padding: const EdgeInsets.all(12),
                   onTap: () async {
-                    // Correct amount, category or date for this record.
+                    // The report still reads local rows while other expenses
+                    // have moved to Firestore, so the shared entry this row
+                    // refers to is looked up by date, category and amount. A row
+                    // with no match is one saved before the move, and is left
+                    // alone rather than opened for editing against a different
+                    // record. This disappears once reports read Firestore too.
+                    final messId =
+                        ref.read(activeMessProvider).valueOrNull?.id ?? '';
+                    final day = dayKey(o.date);
+                    final shared = await ref
+                        .read(messCloudServiceProvider)
+                        .otherExpenses(messId, monthOf(day));
+
+                    CloudOtherExpense? found;
+                    for (final c in shared) {
+                      if (c.date == day &&
+                          c.category == o.category &&
+                          c.amount == o.amount) {
+                        found = c;
+                        break;
+                      }
+                    }
+
                     Navigator.pop(ctx);
+                    if (found == null) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                                'This record was saved on this device only and '
+                                'is not in the mess yet.'),
+                          ),
+                        );
+                      }
+                      return;
+                    }
+
                     await Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) => OtherExpenseScreen(editing: o),
+                        builder: (_) => OtherExpenseScreen(editing: found),
                       ),
                     );
                     if (context.mounted) {
