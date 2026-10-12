@@ -414,6 +414,102 @@ void main() {
     });
   });
 
+  group('the daily allowance', () {
+    final now = DateTime(2026, 10, 12);
+
+    test('the daily rate comes from the shares when none is fixed', () {
+      final b = bundle(collections: [
+        MemberCollection(
+            email: 'ali@x.com', month: '2026-10', amountDue: 31000),
+      ]);
+
+      // 31000 across a 31-day month is 1000 a day.
+      expect(b.todayBudget(now).budget, closeTo(1000, 0.01));
+    });
+
+    test('a fixed daily budget in settings wins over the shares', () {
+      final b = bundle(collections: [
+        MemberCollection(
+            email: 'ali@x.com', month: '2026-10', amountDue: 31000),
+      ]);
+
+      expect(b.todayBudget(now, fixedDailyBudget: 750).budget, 750);
+    });
+
+    test('with no shares and no setting there is no budget', () {
+      final t = bundle().todayBudget(now);
+      expect(t.budget, 0);
+      expect(t.hasTarget, isFalse);
+    });
+
+    test('the cap is worked out from spending before today, not up to it', () {
+      // The whole point: if today's own spending lowered the bar today's
+      // spending is measured against, the number shown would not be the number
+      // being enforced. Spending a lot today must leave the cap untouched.
+      final before = bundle(
+        meals: [meal('2026-10-05', 'Pulao', 5000)],
+        collections: [
+          MemberCollection(
+              email: 'ali@x.com', month: '2026-10', amountDue: 31000),
+        ],
+      );
+      final after = bundle(
+        meals: [
+          meal('2026-10-05', 'Pulao', 5000),
+          meal('2026-10-12', 'Karahi', 900),
+        ],
+        collections: [
+          MemberCollection(
+              email: 'ali@x.com', month: '2026-10', amountDue: 31000),
+        ],
+      );
+
+      expect(after.todayBudget(now).capToday,
+          closeTo(before.todayBudget(now).capToday, 0.01));
+    });
+
+    test("today's spending is still counted against the cap", () {
+      final b = bundle(
+        meals: [meal('2026-10-12', 'Karahi', 900)],
+        collections: [
+          MemberCollection(
+              email: 'ali@x.com', month: '2026-10', amountDue: 31000),
+        ],
+      );
+
+      final t = b.todayBudget(now);
+      expect(t.spent, 900);
+      expect(t.capLeft, closeTo(t.capToday - 900, 0.01));
+    });
+
+    test('days left counts only the days after today', () {
+      // On 12 October a 31-day month leaves 19, the 13th to the 31st.
+      expect(bundle().todayBudget(now).daysLeft, 19);
+    });
+
+    test('a month whose target is already spent offers nothing further', () {
+      final b = bundle(
+        other: [other('2026-10-01', 'Rent', 31000)],
+        collections: [
+          MemberCollection(
+              email: 'ali@x.com', month: '2026-10', amountDue: 31000),
+        ],
+      );
+
+      final t = b.todayBudget(now);
+      expect(t.capToday, 0, reason: 'nothing left to spread');
+      expect(t.safeToSpend, 0, reason: 'and nothing safe to promise');
+    });
+
+    test('the first of a month still gets a cap', () {
+      // Yesterday would fall in the previous month; the count must clamp to the
+      // first of this one rather than reading across the boundary.
+      final t = bundle().todayBudget(DateTime(2026, 10, 1));
+      expect(t.daysLeft, 30);
+      expect(t.capToday, 0, reason: 'no shares means no basis to divide');
+    });
+  });
+
   group('an empty bundle', () {
     test('answers zero everywhere rather than failing', () {
       // Reports render while the mess is still loading; showing zeroes is honest,

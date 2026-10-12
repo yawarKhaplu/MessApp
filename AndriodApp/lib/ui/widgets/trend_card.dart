@@ -86,25 +86,24 @@ class _SpendingTrendCardState extends ConsumerState<SpendingTrendCard> {
 }
 
   Future<_TrendData> _load() async {
-    final repo = ref.read(repositoryProvider);
     final w = _window();
     final days = w.to.difference(w.from).inDays + 1;
 
-    final results = await Future.wait([
-      repo.getDailySplit(w.from, w.to),
-      repo.getTodayBudget(),
-    ]);
-    final rows = results[0] as List<Map<String, Object?>>;
-    final budget = (results[1] as Map<String, double>)['budget'] ?? 0;
+    final bundle =
+        await ref.read(reportBundleProvider.future);
+    final settings = await ref.read(repositoryProvider).getSettings();
+
+    final budget =
+        bundle.todayBudget(DateTime.now(), fixedDailyBudget: settings.dailyBudget)
+            .budget;
 
     // Only days with spending come back, so gaps are filled with zeroes —
     // otherwise the line would lie about quiet days.
     final food = <String, double>{};
     final other = <String, double>{};
-    for (final r in rows) {
-      final key = r['date'] as String;
-      food[key] = (r['food'] as num?)?.toDouble() ?? 0;
-      other[key] = (r['other'] as num?)?.toDouble() ?? 0;
+    for (final r in bundle.dailyTotals(_dayKey(w.from), _dayKey(w.to))) {
+      food[r.day] = r.food;
+      other[r.day] = r.other;
     }
 
     final dates = <DateTime>[];

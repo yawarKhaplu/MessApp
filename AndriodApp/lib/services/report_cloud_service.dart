@@ -81,6 +81,12 @@ class MonthFigures {
   final int daysRemaining;
   final int daysInMonth;
 
+  /// What the mess committed to collecting this month, from the shares.
+  final double target;
+
+  /// How many people the mess is split between.
+  final int memberCount;
+
   /// Days that have gone by, counting today as one of them, but never more than
   /// the month actually has.
   int get daysElapsedSafe => daysElapsed.clamp(0, daysInMonth);
@@ -98,6 +104,8 @@ class MonthFigures {
     required this.daysElapsed,
     required this.daysRemaining,
     required this.daysInMonth,
+    this.target = 0,
+    this.memberCount = 0,
   });
 
   /// Where the month lands if spending simply continues at the current rate.
@@ -135,6 +143,51 @@ class DayRow {
   const DayRow(this.day, this.food, this.other);
 
   double get total => food + other;
+}
+
+/// The daily spending allowance, and where today sits against it.
+class TodayBudget {
+  /// The daily rate being enforced.
+  final double budget;
+
+  /// Spent today.
+  final double spent;
+
+  final double remaining;
+
+  /// Today's share of what was left when the day began.
+  ///
+  /// Frozen for the whole day, so the figure shown is exactly the figure being
+  /// enforced. A number that moved as the day was spent could not be checked
+  /// against anything.
+  final double capToday;
+
+  /// What is left of today's cap after today's spending.
+  final double capLeft;
+
+  /// Live pace across the month, for the cards that are meant to move.
+  final double safeToSpend;
+
+  /// Days after today in this month.
+  final int daysLeft;
+
+  /// Whether the mess has a target to budget against at all.
+  final bool hasTarget;
+
+  /// What is left of the month's target.
+  final double monthLeft;
+
+  const TodayBudget({
+    this.budget = 0,
+    this.spent = 0,
+    this.remaining = 0,
+    this.capToday = 0,
+    this.capLeft = 0,
+    this.safeToSpend = 0,
+    this.daysLeft = 0,
+    this.hasTarget = false,
+    this.monthLeft = 0,
+  });
 }
 
 /// All shared data the reports read, with every figure worked out from it.
@@ -441,6 +494,77 @@ class ReportBundle {
       daysElapsed: elapsed,
       daysRemaining: remaining,
       daysInMonth: daysInMonth,
+      target: collections.due,
+      // Everyone in the mess, not only those with a share recorded: the point of
+      // the figure is how many ways the bill gets split.
+      memberCount: roster.length,
+    );
+  }
+
+  // ---- The daily allowance ----
+
+  /// The daily spending allowance and where today sits against it.
+  ///
+  /// [fixedDailyBudget] comes from device settings, which stay local on purpose:
+  /// a reminder time or a currency is not something the whole mess should see.
+  /// Zero means "not set", in which case the rate is worked out from the month's
+  /// shares.
+  ///
+  /// The cap is worked out from spending *before* today, not up to and including
+  /// it. Using month-to-date would let today's own spending lower the bar today's
+  /// spending is then measured against — the figure on screen would not be the
+  /// figure being enforced.
+  TodayBudget todayBudget(DateTime today, {double fixedDailyBudget = 0}) {
+    final month = monthKeyOf(today);
+    final bounds = monthBounds(month);
+    final todayKey = _dayOf(today);
+
+    final daysInMonth = DateTime(today.year, today.month + 1, 0).day;
+    // Days after today. On 11 October a 31-day month leaves 20, the 12th to the
+    // 31st; today is excluded here and added back into the cap below.
+    final daysLeft = daysInMonth - today.day;
+
+    final monthlyTarget = collectionsFor(month).fold<double>(
+      0,
+      (sum, c) => sum + c.amountDue,
+    );
+
+    var budget = fixedDailyBudget;
+    if (budget <= 0 && monthlyTarget > 0) {
+      budget = monthlyTarget / daysInMonth;
+    }
+
+    final monthSpent = spentBetween(bounds.from, todayKey);
+    final spent = dayTotal(todayKey);
+
+    final basis = monthlyTarget > 0 ? monthlyTarget : budget * daysInMonth;
+    final left = basis - monthSpent;
+
+    // Strictly before today, so today's spending cannot lower its own bar.
+    final before =
+        _dayOf(today.subtract(const Duration(days: 1)));
+    final spentBefore = spentBetween(
+      bounds.from,
+      before.compareTo(bounds.from) < 0 ? bounds.from : before,
+    );
+
+    // Today's share of whatever was left when the day began, spread across today
+    // and the days after it.
+    final daysFromDayStart = daysLeft + 1;
+    final capToday = (daysFromDayStart > 0 && basis > spentBefore)
+        ? (basis - spentBefore) / daysFromDayStart
+        : 0.0;
+
+    return TodayBudget(
+      budget: budget,
+      spent: spent,
+      remaining: budget - spent,
+      capToday: capToday,
+      capLeft: capToday - spent,
+      safeToSpend: daysLeft > 0 && left > 0 ? left / daysLeft : 0.0,
+      daysLeft: daysLeft,
+      hasTarget: basis > 0,
+      monthLeft: left,
     );
   }
 

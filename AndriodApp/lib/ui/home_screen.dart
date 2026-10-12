@@ -23,8 +23,8 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   // Held as fields so each query runs once instead of on every rebuild.
-  Future<Map<String, double>>? _budgetFuture;
-  Future<List<Map<String, Object?>>>? _entriesFuture;
+  // The budget and today's entries both come from the shared bundle now, so
+  // there is nothing held here to fetch or refresh by hand.
 
   @override
   void initState() {
@@ -34,9 +34,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   void _startQueries() {
-    final repo = ref.read(repositoryProvider);
-    _budgetFuture = repo.getTodayBudget();
-    _entriesFuture = repo.getDayExpenses(DateTime.now());
+    // The budget and today's entries both come from the shared bundle now, so
+    // there is nothing to fetch here beyond asking the providers to re-read.
+    ref.invalidate(todayBudgetProvider);
+    ref.invalidate(sharedExpensesProvider(monthKey(DateTime.now())));
   }
 
   Future<void> _refresh() async {
@@ -109,7 +110,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final todayTotal = ref.watch(todayTotalProvider);
+    final todayTotal = ref.watch(todaySpendProvider);
     // Re-query the cooking rotation whenever it changes.
     ref.watch(rotationTickProvider);
     // Re-query today's entries after any edit or delete.
@@ -170,18 +171,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             const SizedBox(height: 24),
 
-            // Today's budget hero (budget / spent / remaining)
-            FutureBuilder<Map<String, double>>(
-              future: _budgetFuture,
-              builder: (context, snap) {
-                final b = snap.data;
-                final spent = b?['spent'] ?? 0;
+            // Today's budget hero (budget / spent / remaining), read from the
+            // shared bundle so it cannot disagree with the daily report.
+            ref.watch(todayBudgetProvider).when(
+              loading: () => const SizedBox(height: 180),
+              error: (e, _) => const SizedBox(height: 180),
+              data: (t) {
                 // Today's frozen allowance. Spending today cannot move it, so the
                 // number on screen is the number being enforced.
-                final capToday = b?['capToday'] ?? 0;
-                final capLeft = b?['capLeft'] ?? 0;
-                final daysLeft = (b?['daysLeft'] ?? 0).round();
-                final hasTarget = (b?['hasTarget'] ?? 0) > 0;
+                final capToday = t.capToday;
+                final capLeft = t.capLeft;
+                final daysLeft = t.daysLeft;
+                final hasTarget = t.hasTarget;
+                final spent = t.spent;
                 // Inside today's allowance or past it.
                 final onTrack = spent < capToday;
                 final remaining = capLeft;

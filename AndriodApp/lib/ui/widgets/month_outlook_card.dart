@@ -32,9 +32,8 @@ class _MonthOutlookCardState extends ConsumerState<MonthOutlookCard> {
     _future = _load();
   }
 
-  Future<MonthOutlook> _load() => ref
-      .read(repositoryProvider)
-      .getMonthOutlook(widget.month);
+  Future<MonthOutlook> _load() async =>
+      ref.read(monthOutlookProvider(widget.month).future);
 
   void _reload() {
     if (!mounted) return;

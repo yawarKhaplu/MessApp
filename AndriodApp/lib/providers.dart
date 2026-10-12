@@ -511,10 +511,31 @@ final membersProvider =
 
 // ---------- Wallet & today ----------
 
-/// Wallet balance. Call `refresh()` after any money movement.
-final walletProvider = StateProvider<double>((ref) => 0.0);
+/// Today's spending, meals and other expenses together, from Firestore.
+///
+/// Meals and other expenses are read from different places, so adding them here
+/// is what keeps "today's total" meaning the same thing as the daily report.
+final todaySpendProvider = Provider<double>((ref) {
+  final bundle = ref.watch(reportBundleProvider).valueOrNull;
+  if (bundle == null) return 0;
+  return bundle.dayTotal(dayKey(DateTime.now()));
+});
 
-final todayTotalProvider = StateProvider<double>((ref) => 0.0);
+/// The daily allowance and where today sits against it.
+///
+/// The fixed rate comes from device settings, which stay local deliberately — a
+/// reminder time or a currency is not something the whole mess should see.
+final todayBudgetProvider =
+    FutureProvider.autoDispose<TodayBudget>((ref) async {
+  final bundle =
+      await ref.watch(reportBundleProvider.future);
+  final settings = await ref.read(repositoryProvider).getSettings();
+
+  return bundle.todayBudget(
+    DateTime.now(),
+    fixedDailyBudget: settings.dailyBudget,
+  );
+});
 
 /// Bumped whenever the cooking rotation changes, so Home/Settings rebuild.
 final rotationTickProvider = StateProvider<int>((ref) => 0);
@@ -533,22 +554,18 @@ final rotationProvider = FutureProvider.autoDispose<CookRotation>((ref) {
 
 /// Call after every write: money, totals, rotation and every report refresh.
 Future<void> refreshTotals(WidgetRef ref) async {
-  final repo = ref.read(repositoryProvider);
-  ref.read(walletProvider.notifier).state = await repo.getWalletBalance();
-  ref.read(todayTotalProvider.notifier).state =
-      await repo.getDayTotal(DateTime.now());
   ref.read(rotationTickProvider.notifier).state++;
   ref.read(dataVersionProvider.notifier).state++;
 
-  ref.invalidate(dailyTotalsProvider);
-  ref.invalidate(menuWiseProvider);
-  ref.invalidate(itemWiseProvider);
-  ref.invalidate(monthCollectionsProvider);
-  ref.invalidate(rotationProvider);
-
-  // Payments and shares change what the reports say about money in, so the
-  // bundle is refreshed here too rather than only from the expense screens.
+  // The bundle is the single source for every money figure now, so refreshing it
+  // refreshes the wallet, today's total, the daily allowance and all six report
+  // tabs at once. Invalidating them one by one is how two tabs end up showing
+  // different numbers for the same day.
   ref.invalidate(reportBundleProvider);
+  ref.invalidate(todayBudgetProvider);
+  ref.invalidate(dailyTotalsProvider);
+  ref.invalidate(monthOutlookProvider);
+  ref.invalidate(rotationProvider);
 }
 
 // ---------- Collection (monthly) ----------
@@ -574,26 +591,55 @@ final reportRangeProvider = StateProvider<({DateTime from, DateTime to})>(
   },
 );
 
-final dailyTotalsProvider = FutureProvider.autoDispose<
-    List<Map<String, Object?>>>((ref) async {
+final dailyTotalsProvider =
+    FutureProvider.autoDispose<List<DayRow>>((ref) async {
   final range = ref.watch(reportRangeProvider);
-  return ref
-      .read(repositoryProvider)
-      .getDailyTotals(range.from, range.to);
+  final bundle = await ref.watch(reportBundleProvider.future);
+  return bundle.dailyTotals(dayKey(range.from), dayKey(range.to));
 });
 
-final menuWiseProvider = FutureProvider.autoDispose<
-    List<Map<String, Object?>>>((ref) async {
-  final range = ref.watch(reportRangeProvider);
-  return ref
-      .read(repositoryProvider)
-      .getMenuWiseTotals(range.from, range.to);
+/// The month outlook for a given month, read from the shared bundle.
+///
+/// Shaped as the existing [MonthOutlook] so the card does not have to be
+/// rewritten; the figures behind it now come from Firestore rather than SQLite,
+/// which is the part that mattered.
+final monthOutlookProvider =
+    FutureProvider.autoDispose.family<MonthOutlook, DateTime>((ref, month) async {
+  final bundle = await ref.watch(reportBundleProvider.future);
+  final f = bundle.monthFigures(monthKey(month), DateTime.now());
+
+  return MonthOutlook(
+    // The card holds the month as a DateTime on the first of the month, while the
+    // bundle keys it as text. Parsed back so the card needs no rewrite; the month
+    // is only ever used as a label and a key here, never as a day.
+    month: DateTime.parse('${f.month}-01'),
+    target: f.target,
+    collected: f.collected,
+    spent: f.spent,
+    daysElapsed: f.daysElapsed,
+    daysRemaining: f.daysRemaining,
+    daysInMonth: f.daysInMonth,
+    memberCount: f.memberCount,
+    committed: f.committed,
+    projectedAtFixedRate: f.projectedAtFixedRate,
+    foodSpent: f.foodSpent,
+    otherSpent: f.otherSpent,
+    expectedOther: f.expectedOther,
+    stillDue: f.collections.stillDue,
+    credit: f.collections.credit,
+  );
 });
 
-final itemWiseProvider = FutureProvider.autoDispose<
-    List<Map<String, Object?>>>((ref) async {
+final menuWiseProvider =
+    FutureProvider.autoDispose<List<ReportRow>>((ref) async {
   final range = ref.watch(reportRangeProvider);
-  return ref
-      .read(repositoryProvider)
-      .getItemWiseTotals(range.from, range.to);
+  final bundle = await ref.watch(reportBundleProvider.future);
+  return bundle.byMenu(dayKey(range.from), dayKey(range.to));
+});
+
+final itemWiseProvider =
+    FutureProvider.autoDispose<List<ReportRow>>((ref) async {
+  final range = ref.watch(reportRangeProvider);
+  final bundle = await ref.watch(reportBundleProvider.future);
+  return bundle.byItem(dayKey(range.from), dayKey(range.to));
 });
