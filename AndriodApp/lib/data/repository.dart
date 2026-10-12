@@ -71,18 +71,22 @@ class MessRepository {
 
   /// Items that belong to other menus, so they can be reused instead of
 /// retyped. Returns the name, the menus it appears in and a typical price.
+///
+/// Excludes a menu by name rather than by local id: the menus are shared and
+/// live in Firestore, so there is no local integer to join against. This stays
+/// local only until expenses move across too.
 Future<List<Map<String, Object?>>> getItemSuggestions(
-    int excludeMenuId) async {
+    String excludeMenuName) async {
   return (await _database).rawQuery('''
     SELECT i.item_name AS name,
            GROUP_CONCAT(DISTINCT m.name) AS menus,
            MAX(i.default_price) AS last_price
     FROM menu_items i
     JOIN menus m ON m.id = i.menu_id
-    WHERE i.menu_id != ?
+    WHERE m.name != ? COLLATE NOCASE
     GROUP BY i.item_name COLLATE NOCASE
     ORDER BY i.item_name COLLATE NOCASE
-  ''', [excludeMenuId]);
+  ''', [excludeMenuName]);
 }
 
 Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
@@ -125,9 +129,21 @@ Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
   // ---------- Expenses (menu entries) ----------
 
   /// Saves an expense with its items. Returns the new expense id.
+  /// Local id for a menu, looked up by name.
+///
+/// A bridge, not a design. Menus are shared and keyed by string in Firestore,
+/// while expenses are still local and join on an integer id. Until expenses move
+/// across, the name is the only thing both sides share.
+Future<int?> menuIdNamed(String name) async {
+    final rows = await (await _database)
+        .query('menus', where: 'name = ?', whereArgs: [name], limit: 1);
+    return rows.isEmpty ? null : rows.first['id'] as int?;
+  }
+
+  /// Saves an expense with its items. Returns the new expense id.
   Future<int> addExpense({
     required DateTime date,
-    required int menuId,
+    required int? menuId,
     required List<ExpenseItem> items,
     int? memberId,
   }) async {
@@ -498,15 +514,21 @@ Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
   /// Prefers the most recent entry for that menu (an exact repeat of what
   /// worked before); falls back to averaging every past entry, and finally to
   /// [SplitHints.empty] when nothing has been recorded yet.
-  Future<SplitHints> getSplitHints(int menuId) async {
+  /// How the last entry for a menu split its total, used as a starting guess.
+///
+/// Takes the menu NAME rather than a local id. The menus are now shared and live
+/// in Firestore, so there is no local integer id to join against; the name is
+/// what both sides have in common until expenses move across too.
+Future<SplitHints> getSplitHints(String menuName) async {
     final d = await _database;
 
     // 1. Most recent entry for this menu -> exact proportions.
     final latest = await d.rawQuery('''
       SELECT e.id, e.date FROM expenses e
-      WHERE e.menu_id = ? AND e.total > 0
+      JOIN menus m ON m.id = e.menu_id
+      WHERE m.name = ? COLLATE NOCASE AND e.total > 0
       ORDER BY e.date DESC, e.id DESC LIMIT 1
-    ''', [menuId]);
+    ''', [menuName]);
 
     if (latest.isNotEmpty) {
       final expenseId = latest.first['id'] as int?;
@@ -528,10 +550,12 @@ Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
     // 2. Otherwise average every entry ever made for this menu.
     final avg = await d.rawQuery('''
       SELECT i.item_name AS item_name, AVG(i.price * i.quantity) AS amount
-      FROM expense_items i JOIN expenses e ON e.id = i.expense_id
-      WHERE e.menu_id = ?
+      FROM expense_items i
+      JOIN expenses e ON e.id = i.expense_id
+      JOIN menus m ON m.id = e.menu_id
+      WHERE m.name = ? COLLATE NOCASE
       GROUP BY i.item_name COLLATE NOCASE
-    ''', [menuId]);
+    ''', [menuName]);
     final shares = _normalise(avg);
     if (shares.isEmpty) return SplitHints.empty;
     return SplitHints(shares, null);
@@ -791,6 +815,69 @@ Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
 
   Future<int> addMember(String name) async {
     return (await _database).insert('members', {'name': name});
+  }
+
+  /// Mirrors the shared mess roster into the local members table.
+  ///
+  /// Firestore owns who is in the mess; this table owns the money recorded
+  /// against each person. This is the join between the two: one local row per
+  /// roster member, matched on email so re-running it updates rather than
+  /// duplicates.
+  ///
+  /// Never deletes. Someone removed from the roster keeps their row and their
+  /// payment history, which is what a money record has to do — losing it would
+  /// quietly change what the mess is owed.
+  ///
+  /// A display name is only written when the roster has one, so an existing
+  /// name chosen on this device is not overwritten with an empty string the
+  /// first time somebody is added by email.
+  Future<List<Member>> syncRoster(
+      List<({String email, String? name})> roster) async {
+    final db = await _database;
+    final existing = await db.query('members');
+
+    for (final person in roster) {
+      final email = person.email.trim().toLowerCase();
+      if (email.isEmpty) continue;
+      final incoming = (person.name ?? '').trim();
+
+      final match = existing.where(
+          (row) => (row['email'] as String?)?.toLowerCase() == email);
+
+      if (match.isNotEmpty) {
+        final row = match.first;
+        // Fill a missing name from the roster, but never replace a real one.
+        final current = (row['name'] as String?) ?? '';
+        if (current.trim().isEmpty && incoming.isNotEmpty) {
+          await db.update('members', {'name': incoming},
+              where: 'id = ?', whereArgs: [row['id']]);
+        }
+        continue;
+      }
+
+      // No link yet. Reuse an unlinked row with the same name, so money
+      // already recorded against that name survives them joining the mess
+      // rather than being split across two rows.
+      final unlinked = existing
+          .where((r) => (r['email'] as String? ?? '').isEmpty)
+          .toList();
+      final sameName = unlinked.where((r) =>
+          ((r['name'] as String? ?? '').trim().toLowerCase()) ==
+          incoming.toLowerCase().trim());
+
+      if (sameName.isNotEmpty) {
+        await db.update('members', {'email': email},
+            where: 'id = ?', whereArgs: [sameName.first['id']]);
+        continue;
+      }
+
+      await db.insert('members', {
+        'name': incoming.isEmpty ? person.email : incoming,
+        'email': email,
+      });
+    }
+
+    return getMembers();
   }
 
   Future<void> renameMember(int id, String name) async {

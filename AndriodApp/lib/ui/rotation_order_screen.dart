@@ -1,17 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
 
-import '../data/models.dart';
 import '../providers.dart';
+import '../services/mess_cloud_service.dart';
 import 'theme.dart';
 import 'widgets/app_widgets.dart';
 
-/// Lets the user decide who takes the next bari.
+/// Lets the owner decide who takes the next bari.
 ///
-/// The list is the cooking order: whoever is on top of the list cooks today,
-/// the one below cooks the next day, and so on. Drag to reorder, or use the
-/// star to hand the bari to somebody further down.
+/// The order is the shared cooking order: whoever is on top cooks today, the one
+/// below cooks the next day. It reads from the mess document rather than the
+/// local database, so the whole mess sees the same order and reordering it
+/// changes it for everyone. Owner only.
 class RotationOrderScreen extends ConsumerStatefulWidget {
   const RotationOrderScreen({super.key});
 
@@ -21,9 +21,11 @@ class RotationOrderScreen extends ConsumerStatefulWidget {
 }
 
 class _RotationOrderScreenState extends ConsumerState<RotationOrderScreen> {
-  List<Member> _order = [];
+  /// The order being edited. Starts from the shared one and diverges locally
+  /// until saved, so a drag does not fire a write per pixel of movement.
+  List<MessMember> _order = [];
   bool _loading = true;
-  DateTime? _lastCooked;
+  bool _saving = false;
 
   @override
   void initState() {
@@ -31,23 +33,43 @@ class _RotationOrderScreenState extends ConsumerState<RotationOrderScreen> {
     _load();
   }
 
-  Future<void> _load() async {
-    final repo = ref.read(repositoryProvider);
-    final order = await repo.getRotationOrder();
-    final last = await repo.getLastRecordedCook();
+  void _load() {
+    final turn = ref.read(messTurnProvider);
     if (!mounted) return;
     setState(() {
-      _order = order;
-      _lastCooked = last?.date;
+      _order = List<MessMember>.from(turn.order);
       _loading = false;
     });
   }
 
-  Future<void> _save() async {
-    await ref
-        .read(repositoryProvider)
-        .setRotationOrder(_order.map((m) => m.id!).toList());
-    await refreshTotals(ref);
+  /// Writes the new order and the anchor to the mess document.
+  Future<void> _save({String? anchorEmail}) async {
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null || _order.isEmpty) return;
+
+    setState(() => _saving = true);
+    try {
+      await ref.read(messCloudServiceProvider).setTurn(
+            messId: mess.id,
+            // Re-anchoring to today keeps whoever is on top as today's cook, so
+            // reordering the list does not silently move the turn backwards.
+            anchorDate: DateTime.now(),
+            anchorEmail: anchorEmail ?? _order.first.email,
+            order: _order.map((m) => m.email).toList(),
+          );
+      ref.invalidate(activeMessProvider);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Cooking order saved for the whole mess')),
+      );
+    } on CloudMessage catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.text)),
+      );
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   void _move(int oldIndex, int newIndex) {
@@ -59,26 +81,40 @@ class _RotationOrderScreenState extends ConsumerState<RotationOrderScreen> {
     _save();
   }
 
-  Future<void> _giveBari(Member m) async {
-    await ref.read(repositoryProvider).setBari(DateTime.now(), m);
-    await refreshTotals(ref);
-    if (!mounted) return;
-    // Move them to the top so the list matches who cooks today.
+  Future<void> _giveBari(MessMember m) async {
+    // Move them to the top so the list matches who cooks today, then anchor on
+    // them rather than on whoever happens to be first.
     setState(() {
-      _order.removeWhere((x) => x.id == m.id);
+      _order.removeWhere((x) => x.email.toLowerCase() == m.email.toLowerCase());
       _order.insert(0, m);
     });
-    await _save();
+    await _save(anchorEmail: m.email);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('${m.name} has the bari today')),
+      SnackBar(content: Text('${m.name ?? m.email} has the bari today')),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final mess = ref.watch(activeMessProvider).valueOrNull;
+    final isOwner = mess?.isOwner ?? false;
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Cooking order')),
+      appBar: AppBar(
+        title: const Text('Cooking order'),
+        actions: [
+          if (_saving)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+        ],
+      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _order.isEmpty
@@ -95,8 +131,11 @@ class _RotationOrderScreenState extends ConsumerState<RotationOrderScreen> {
                             const SizedBox(width: 10),
                             Expanded(
                               child: Text(
-                                'Drag to change who cooks next. The top of the '
-                                'list has today\'s bari.',
+                                isOwner
+                                    ? 'Drag to change who cooks next. The top of '
+                                        'the list has today\'s bari.'
+                                    : 'This is the cooking order for the mess. '
+                                        'Only the owner can change it.',
                                 style: Theme.of(context).textTheme.bodySmall,
                               ),
                             ),
@@ -104,24 +143,18 @@ class _RotationOrderScreenState extends ConsumerState<RotationOrderScreen> {
                         ),
                       ),
                     ),
-                    if (_lastCooked != null)
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-                        child: Text(
-                          'Last cooked: ${DateFormat('d MMM yyyy').format(_lastCooked!)}',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ),
                     Expanded(
                       child: ReorderableListView.builder(
                         padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
                         itemCount: _order.length,
-                        onReorder: _move,
+                        // Reordering is an owner action; a member sees the order
+                        // as a read-only schedule.
+                        onReorder: isOwner ? _move : (_, __) {},
                         buildDefaultDragHandles: false,
                         itemBuilder: (context, i) {
                           final m = _order[i];
                           return Padding(
-                            key: ValueKey(m.id),
+                            key: ValueKey(m.email),
                             padding: const EdgeInsets.only(bottom: 10),
                             child: AppCard(
                               padding: const EdgeInsets.all(12),
@@ -155,7 +188,7 @@ class _RotationOrderScreenState extends ConsumerState<RotationOrderScreen> {
                                           CrossAxisAlignment.start,
                                       children: [
                                         Text(
-                                          m.name,
+                                          m.name ?? m.email,
                                           overflow: TextOverflow.ellipsis,
                                           style: const TextStyle(
                                               fontWeight: FontWeight.w700),
@@ -178,21 +211,22 @@ class _RotationOrderScreenState extends ConsumerState<RotationOrderScreen> {
                                       ],
                                     ),
                                   ),
-                                  if (i != 0)
+                                  if (i != 0 && isOwner)
                                     IconButton(
                                       tooltip: 'Give today\'s bari',
                                       icon: const Icon(Icons.star_outline,
                                           size: 20),
                                       onPressed: () => _giveBari(m),
                                     ),
-                                  ReorderableDragStartListener(
-                                    index: i,
-                                    child: const Padding(
-                                      padding: EdgeInsets.all(8),
-                                      child: Icon(Icons.drag_handle,
-                                          color: AppTheme.textSecondary),
+                                  if (isOwner)
+                                    ReorderableDragStartListener(
+                                      index: i,
+                                      child: const Padding(
+                                        padding: EdgeInsets.all(8),
+                                        child: Icon(Icons.drag_handle,
+                                            color: AppTheme.textSecondary),
+                                      ),
                                     ),
-                                  ),
                                 ],
                               ),
                             ),

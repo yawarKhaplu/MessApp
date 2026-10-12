@@ -5,6 +5,9 @@ import 'package:intl/intl.dart';
 import '../data/models.dart';
 import '../data/repository.dart';
 import '../providers.dart';
+import '../services/expense_cloud_service.dart';
+import '../services/mess_cloud_service.dart';
+import '../services/menu_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'widgets/item_dialog.dart';
@@ -15,7 +18,7 @@ import 'widgets/text_input_dialog.dart';
 /// Daily entry flow (PRD 5.3): pick date & menu, edit item prices,
 /// remove unused items, add one-off items, save.
 class MenuEntryScreen extends ConsumerStatefulWidget {
-  final Menu? menu;
+  final CloudMenu? menu;
   const MenuEntryScreen({super.key, this.menu});
 
   @override
@@ -24,11 +27,16 @@ class MenuEntryScreen extends ConsumerStatefulWidget {
 
 class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
   DateTime _date = DateTime.now();
-  Menu? _menu;
+  CloudMenu? _menu;
   Member? _member;
-  List<MenuItem> _items = [];
-  final Map<int, TextEditingController> _priceControllers = {};
-  final Map<int, TextEditingController> _qtyControllers = {};
+
+  /// Menu items come from the shared catalogue, so everyone enters against the
+  /// same list.
+  List<CloudMenuItem> _items = [];
+
+  /// Keyed by the item's id from the catalogue.
+  final Map<String, TextEditingController> _priceControllers = {};
+  final Map<String, TextEditingController> _qtyControllers = {};
 
   /// The grand total the user types in; used to split across items.
   final TextEditingController _totalCtrl = TextEditingController();
@@ -56,12 +64,12 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
     if (mounted) _tick.value++;
   }
 
-  void _bind(MenuItem item) {
+  void _bind(CloudMenuItem item) {
     _priceControllers[item.id]?.addListener(_onItemsChanged);
     _qtyControllers[item.id]?.addListener(_onItemsChanged);
   }
 
-  void _unbind(MenuItem item) {
+  void _unbind(CloudMenuItem item) {
     _priceControllers[item.id]?.removeListener(_onItemsChanged);
     _qtyControllers[item.id]?.removeListener(_onItemsChanged);
   }
@@ -120,19 +128,25 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
   Future<void> _load() async {
     final repo = ref.read(repositoryProvider);
     if (_menu != null) {
-      _items = await repo.getMenuItems(_menu!.id!);
+      // Items from the shared catalogue; split history still comes from the
+      // local expense records until those move to Firestore.
+      _items = _catalogueItems(_menu!.id);
       for (final item in _items) {
         _priceCtrl(item);
         _qtyCtrl(item);
         _bind(item);
       }
-      _hints = await repo.getSplitHints(_menu!.id!);
+      _hints = await repo.getSplitHints(_menu!.name);
     }
     // Default: whoever is on cooking turn for the selected date.
     _member = await repo.getCookOfTheDay(_date);
     if (!mounted) return;
     setState(() => _loading = false);
   }
+
+  /// Items for a menu, read from the catalogue already loaded.
+  List<CloudMenuItem> _catalogueItems(String menuId) =>
+      ref.read(menusProvider).valueOrNull?.byId(menuId)?.items ?? const [];
 
   /// Creates a menu and immediately selects it, so a brand new menu can be
   /// used without leaving this screen.
@@ -149,18 +163,18 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
     await ref.read(menusProvider.notifier).add(name.trim());
     if (!mounted) return;
 
-    final menus = await ref.read(repositoryProvider).getMenus();
-    if (!mounted) return;
+    final menus = ref.read(menusProvider).valueOrNull?.menus ?? const [];
+    if (menus.isEmpty) return;
     final created = menus.firstWhere(
       (m) => m.name.toLowerCase() == name.trim().toLowerCase(),
       orElse: () => menus.last,
     );
-    ref.invalidate(menuItemCountsProvider);
+    ref.invalidate(menusProvider);
     await _selectMenu(created);
   }
 
   /// Switches the form to [picked] and loads its items and split history.
-  Future<void> _selectMenu(Menu picked) async {
+  Future<void> _selectMenu(CloudMenu picked) async {
     setState(() {
       _menu = picked;
       _loading = true;
@@ -168,8 +182,8 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
     });
     _clearControllers();
     final repo = ref.read(repositoryProvider);
-    _items = await repo.getMenuItems(picked.id!);
-    _hints = await repo.getSplitHints(picked.id!);
+    _items = _catalogueItems(picked.id);
+    _hints = await repo.getSplitHints(picked.name);
     for (final item in _items) {
       _priceCtrl(item);
       _qtyCtrl(item);
@@ -182,12 +196,14 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
   /// Opens the menu chooser as a bottom sheet showing each menu with how many
   /// items it carries, so it is obvious which one will fill the form.
   Future<void> _pickMenu() async {
-    final repo = ref.read(repositoryProvider);
-    final menus = await repo.getMenus();
-    final counts = await repo.getMenuItemCounts();
+    // From the shared catalogue, so the menu a member picks is the same one the
+    // owner sees.
+    final catalogue = ref.read(menusProvider).valueOrNull;
+    final menus = catalogue?.menus ?? const <CloudMenu>[];
+    final counts = catalogue?.itemCounts ?? const <String, int>{};
     if (!mounted) return;
 
-    final picked = await showModalBottomSheet<Menu>(
+    final picked = await showModalBottomSheet<CloudMenu>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
@@ -301,17 +317,17 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
     _qtyControllers.clear();
   }
 
-  TextEditingController _priceCtrl(MenuItem item) =>
+  TextEditingController _priceCtrl(CloudMenuItem item) =>
       _priceControllers.putIfAbsent(
-          item.id!,
+          item.id,
           () => TextEditingController(
               text: item.defaultPrice > 0
                   ? item.defaultPrice.toStringAsFixed(0)
                   : ''));
 
-  TextEditingController _qtyCtrl(MenuItem item) =>
+  TextEditingController _qtyCtrl(CloudMenuItem item) =>
       _qtyControllers.putIfAbsent(
-          item.id!, () => TextEditingController(text: '1'));
+          item.id, () => TextEditingController(text: '1'));
 
   double _parsePrice(TextEditingController c) =>
       double.tryParse(c.text.replaceAll(',', '')) ?? 0;
@@ -339,16 +355,23 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
     final name = result.name;
     final price = result.price.toStringAsFixed(0);
 
+    // A one-off item is not saved to the menu, so it needs an id that cannot
+    // collide with a real catalogue item. Prefixed so it is obvious in the
+    // controller maps and never mistaken for a stored id.
+    const oneOffId = 'tmp';
+
     setState(() {
-      _items.add(MenuItem(
-        id: -_items.length - 1,
-        menuId: _menu?.id ?? 0,
+      _items.add(CloudMenuItem(
+        id: oneOffId,
         name: name.trim(),
+        defaultPrice: double.tryParse(price) ?? 0,
+        // Sorted to the end so a one-off never displaces a real item.
+        order: 1000,
       ));
       final added = _items.last;
-      _priceControllers[added.id!] =
+      _priceControllers[added.id] =
           TextEditingController(text: price.trim());
-      _qtyControllers[added.id!] = TextEditingController(text: '1');
+      _qtyControllers[added.id] = TextEditingController(text: '1');
       _bind(added);
     });
 
@@ -366,10 +389,11 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
           action: SnackBarAction(
             label: 'Save to menu',
             onPressed: () async {
-              await repo.addMenuItem(_menu!.id!, itemName, amount);
-              ref.read(dataVersionProvider.notifier).state++;
-              ref.invalidate(menuItemCountsProvider);
-              _hints = await repo.getSplitHints(_menu!.id!);
+              await ref
+                  .read(menusProvider.notifier)
+                  .addItem(_menu!.id, itemName, amount);
+              ref.invalidate(menusProvider);
+              _hints = await repo.getSplitHints(_menu!.name);
               if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('"$itemName" saved to ${_menu!.name}')),
@@ -390,7 +414,7 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
 
     if (_menu != null) {
       try {
-        final rows = await repo.getItemSuggestions(_menu!.id!);
+        final rows = await repo.getItemSuggestions(_menu!.name);
         for (final r in rows) {
           final name = ((r['name'] as String?) ?? '').trim();
           if (name.isEmpty) continue;
@@ -433,7 +457,7 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
   }
 
-  void _removeItem(MenuItem item) {
+  void _removeItem(CloudMenuItem item) {
     setState(() {
       _items.removeWhere((i) => i.id == item.id);
       _unbind(item);
@@ -579,19 +603,53 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
       return;
     }
 
-    await ref.read(repositoryProvider).addExpense(
-          date: _date,
-          menuId: _menu!.id!,
-          items: entries,
-          memberId: _member?.id,
-        );
-    await refreshTotals(ref);
+    // Written to Firestore so the whole mess sees it, not just this phone.
+        //
+        // The cook is the person whose turn it is, resolved from the shared
+        // schedule. Falling back to the signed-in account matters: the owner may
+        // record on anyone's behalf, and a member opening this screen is by
+        // definition the person on turn.
+        final cook = _cookEmailForToday() ??
+            (ref.read(currentUserProvider).valueOrNull?.email ?? '');
+
+        try {
+          await saveExpense(
+            ref: ref,
+            date: monthKey(_date),
+            menuName: _menu?.name ?? 'Entry',
+            cookEmail: cook,
+            items: [
+              for (var i = 0; i < entries.length; i++)
+                CloudExpenseItem(
+                  id: newExpenseItemId(),
+                  name: entries[i].itemName,
+                  quantity: entries[i].quantity,
+                  price: entries[i].price,
+                ),
+            ],
+          );
+        } on CloudMessage catch (e) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text(e.text)));
+          return;
+        }
 
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Saved ${DateFormat.yMMMEd().format(_date)}')),
     );
     Navigator.pop(context, true);
+  }
+
+  /// Who is on turn for the day being entered, by email.
+  ///
+  /// Read from the shared schedule rather than the local rotation, so the meal is
+  /// attributed to whoever the mess agrees is cooking.
+  String? _cookEmailForToday() {
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    final cook = mess?.turn.today;
+    return cook?.email.trim().toLowerCase();
   }
 
   @override
@@ -1057,7 +1115,7 @@ class _EntryBottomBar extends StatelessWidget {
 
 /// One row in the menu chooser: name, kind, and how many items it holds.
 class _MenuChoiceTile extends StatelessWidget {
-  final Menu menu;
+  final CloudMenu menu;
   final int itemCount;
   final bool selected;
   final VoidCallback onTap;

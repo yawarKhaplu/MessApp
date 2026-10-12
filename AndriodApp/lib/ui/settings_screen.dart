@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 
 import '../data/models.dart';
 import '../providers.dart';
+import '../services/mess_cloud_service.dart';
 import '../services/notifications.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
@@ -409,19 +410,25 @@ class _PermissionCardState extends State<_PermissionCard> {
   }
 }
 
-/// Lets the user decide the cooking rotation: who has today's bari, the
-/// full running order, and where the cycle was anchored.
+/// Lets the owner control the cooking rotation.
+///
+/// Reads the shared turn from the mess document rather than the local database,
+/// so the schedule is the same for everyone in the mess and only the owner can
+/// change it. Members see the schedule without any controls.
 class _RotationCard extends ConsumerWidget {
   const _RotationCard();
 
   Future<void> _pickBari(
-      BuildContext context, WidgetRef ref, CookRotation rot) async {
-    final picked = await showDialog<Member>(
+      BuildContext context, WidgetRef ref, MessTurn turn) async {
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+
+    final picked = await showDialog<MessMember>(
       context: context,
       builder: (ctx) => SimpleDialog(
         title: const Text('Who has the bari today?'),
         children: [
-          for (final m in rot.members)
+          for (final m in turn.order)
             SimpleDialogOption(
               onPressed: () => Navigator.pop(ctx, m),
               child: Padding(
@@ -431,8 +438,9 @@ class _RotationCard extends ConsumerWidget {
                     Icon(Icons.person_outline,
                         size: 18, color: AppTheme.primary),
                     const SizedBox(width: 10),
-                    Expanded(child: Text(m.name)),
-                    if (m.id == rot.cook?.id)
+                    Expanded(child: Text(m.name ?? m.email)),
+                    if (m.email.toLowerCase() ==
+                        turn.today?.email.toLowerCase())
                       const AppBadge(
                         label: 'ON TURN',
                         color: AppTheme.secondary,
@@ -445,241 +453,170 @@ class _RotationCard extends ConsumerWidget {
         ],
       ),
     );
-    if (picked == null) return;
-    await ref.read(repositoryProvider).setBari(DateTime.now(), picked);
-    await refreshTotals(ref);
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('${picked.name} has the bari today')),
-    );
-  }
+    if (picked == null || !context.mounted) return;
 
-  Future<void> _confirmReset(
-      BuildContext context, WidgetRef ref, CookRotation rot) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Reset rotation?'),
-        content: Text(
-            'The cycle restarts today from the top of the list, so '
-            '${rot.members.first.name} gets the bari first again.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Reset')),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    await ref.read(repositoryProvider).resetRotation();
-    await refreshTotals(ref);
+    try {
+      await ref.read(messCloudServiceProvider).setTurn(
+            messId: mess.id,
+            anchorDate: DateTime.now(),
+            anchorEmail: picked.email,
+            order: turn.order.map((m) => m.email).toList(),
+          );
+      // The anchor lives on the mess document, so re-read it.
+      ref.invalidate(activeMessProvider);
+      await refreshTotals(ref);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text('${picked.name ?? picked.email} has the bari today')),
+      );
+    } on CloudMessage catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.text)),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final rotation = ref.watch(rotationProvider);
+    final mess = ref.watch(activeMessProvider).valueOrNull;
+    final turn = ref.watch(messTurnProvider);
 
-    return rotation.when(
-      loading: () => const AppCard(
-        child: Padding(
-          padding: EdgeInsets.symmetric(vertical: 18),
-          child: Center(child: CircularProgressIndicator()),
-        ),
-      ),
-      error: (e, _) => AppCard(
+    if (mess == null || !turn.hasMembers || turn.today == null) {
+      return const AppCard(
         child: ListTile(
           contentPadding: EdgeInsets.zero,
-          title: const Text('Cooking rotation'),
-          subtitle: Text('Error: $e'),
+          leading: Icon(Icons.group_outlined, color: AppTheme.textSecondary),
+          title: Text('Cooking rotation'),
+          subtitle: Text('Add members to start the cooking rotation'),
         ),
-      ),
-      data: (rot) {
-        if (!rot.hasMembers) {
-          return const AppCard(
-            child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.group_outlined, color: AppTheme.textSecondary),
-              title: Text('No members yet'),
-              subtitle: Text('Add members from the Collection tab to start '
-                  'the cooking rotation'),
-            ),
-          );
-        }
+      );
+    }
 
-        return Column(
-          children: [
-            AppCard(
-              onTap: () => _pickBari(context, ref, rot),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+    final who = turn.today!.name ?? turn.today!.email;
+    final firstName = who.trim().split(' ').first;
+    final again = turn.roundLength - 1;
+
+    return Column(
+      children: [
+        AppCard(
+          onTap: mess.isOwner ? () => _pickBari(context, ref, turn) : null,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
-                  Row(
-                    children: [
-                      Container(
-                        width: 44,
-                        height: 44,
-                        decoration: BoxDecoration(
-                          gradient: const LinearGradient(
-                            colors: [AppTheme.secondary, Color(0xFF00695C)],
-                          ),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(Icons.rotate_right,
-                            color: Colors.white, size: 22),
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [AppTheme.secondary, Color(0xFF00695C)],
                       ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text("Today's bari",
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .titleMedium),
-                            const SizedBox(height: 2),
-                            Text(
-                              '${rot.cook?.name ?? '—'} · tap to change',
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const Icon(Icons.chevron_right, size: 20),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  Text(
-                    rot.followsHistory
-                        ? 'Following your cooking history — it picks whoever '
-                            'comes after the last person who cooked.'
-                        : 'Everyone cooks once, then it comes back around — '
-                            '${rot.cook?.name.split(' ').first ?? 'they'} cook '
-                            'again in ${rot.daysUntilNextTurn} '
-                            '${rot.daysUntilNextTurn == 1 ? 'day' : 'days'}.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: AppTheme.textSecondary.withOpacity(0.95),
+                      borderRadius: BorderRadius.circular(12),
                     ),
+                    child: const Icon(Icons.rotate_right,
+                        color: Colors.white, size: 22),
                   ),
-                  if (rot.recordedCook != null) ...[
-                    const SizedBox(height: 10),
-                    Row(
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Icon(Icons.history,
-                            size: 15, color: AppTheme.secondary),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            rot.recordedDiffersFromPlan
-                                ? '${rot.recordedCook!.member.name} cooked today (planned: ${rot.cook?.name})'
-                                : '${rot.recordedCook!.member.name} cooked today',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                              color: AppTheme.secondary,
-                            ),
-                          ),
+                        Text("Today's bari",
+                            style: Theme.of(context).textTheme.titleMedium),
+                        const SizedBox(height: 2),
+                        Text(
+                          '$who · turn ${turn.positionInRound} of '
+                          '${turn.roundLength}'
+                          '${mess.isOwner ? ' · tap to change' : ''}',
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodySmall,
                         ),
                       ],
                     ),
-                  ],
+                  ),
+                  if (mess.isOwner) const Icon(Icons.chevron_right, size: 20),
                 ],
               ),
-            ),
-            const SizedBox(height: 10),
-            AppCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Coming up',
-                      style: Theme.of(context).textTheme.titleSmall),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Rotation order · started from '
-                    '${rot.members[rot.positionInRound - 1].name}',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 12),
-                  for (int i = 0; i < rot.upcoming.length; i++)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: 62,
-                            child: Text(
-                              i == 0
-                                  ? 'Today'
-                                  : DateFormat('EEE d MMM').format(rot.upcoming[i].date),
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: i == 0
-                                    ? AppTheme.secondary
-                                    : AppTheme.textSecondary,
-                              ),
-                            ),
-                          ),
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: i == 0
-                                  ? AppTheme.secondary
-                                  : AppTheme.divider,
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              rot.upcoming[i].member.name,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontWeight:
-                                    i == 0 ? FontWeight.w800 : FontWeight.w600,
-                                color: i == 0
-                                    ? AppTheme.secondary
-                                    : AppTheme.textPrimary,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  const SizedBox(height: 4),
-                  const Divider(height: 1),
-                  Row(
+              const SizedBox(height: 14),
+              Text(
+                'Everyone cooks once, then it comes back around — '
+                '$firstName cooks again in $again '
+                '${again == 1 ? 'day' : 'days'}.',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: AppTheme.textSecondary.withOpacity(0.95),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        AppCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Coming up', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 2),
+              Text(
+                'Shared with everyone in this mess',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 12),
+              for (int i = 0; i < turn.upcoming.length; i++)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Row(
                     children: [
-                      Expanded(
-                        child: TextButton.icon(
-                          onPressed: () async {
-                            await ref
-                                .read(repositoryProvider)
-                                .followHistoryAgain();
-                            await refreshTotals(ref);
-                          },
-                          icon: const Icon(Icons.history, size: 18),
-                          label: const Text('Follow history'),
+                      SizedBox(
+                        width: 62,
+                        child: Text(
+                          i == 0
+                              ? 'Today'
+                              : DateFormat('EEE d MMM')
+                                  .format(turn.upcoming[i].date),
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: i == 0
+                                ? AppTheme.secondary
+                                : AppTheme.textSecondary,
+                          ),
                         ),
                       ),
-                      TextButton.icon(
-                        onPressed: () => _confirmReset(context, ref, rot),
-                        icon: const Icon(Icons.restart_alt, size: 18),
-                        label: const Text('Reset'),
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color:
+                              i == 0 ? AppTheme.secondary : AppTheme.divider,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          turn.upcoming[i].member.name ??
+                              turn.upcoming[i].member.email,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontWeight:
+                                i == 0 ? FontWeight.w800 : FontWeight.w600,
+                            color: i == 0
+                                ? AppTheme.secondary
+                                : AppTheme.textPrimary,
+                          ),
+                        ),
                       ),
                     ],
                   ),
-                ],
-              ),
-            ),
-          ],
-        );
-      },
+                ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

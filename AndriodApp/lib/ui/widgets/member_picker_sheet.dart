@@ -23,6 +23,13 @@ Future<Object?> showMemberPickerSheet(
   BuildContext context, {
   required List<Member> members,
   Member? current,
+
+  /// Marks the selected row by address instead of by local id.
+  ///
+  /// The roster is shared and keyed by email, so a selection made from it has no
+  /// local integer id to compare against. Used by the screens that work from
+  /// shared data.
+  String? currentEmail,
   int? turnIndex,
   bool allowUnassigned = true,
   String title = 'Who is cooking / paying?',
@@ -82,7 +89,11 @@ Future<Object?> showMemberPickerSheet(
                 padding: const EdgeInsets.only(bottom: 10),
                 child: _MemberTile(
                   member: members[i],
-                  selected: current?.id == members[i].id,
+                  // Selected by address when one was given, because a member built from the
+                  // shared roster has no local id to match on.
+                  selected: currentEmail != null
+                      ? members[i].email?.trim().toLowerCase() == currentEmail
+                      : current?.id == members[i].id,
                   onTurn: turnIndex != null && turnIndex == i,
                   dueIn: turnIndex == null ? null : _daysUntil(i, turnIndex, n),
                   onTap: () => Navigator.pop(ctx, members[i]),

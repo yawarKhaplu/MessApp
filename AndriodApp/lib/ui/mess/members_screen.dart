@@ -7,6 +7,7 @@ import '../../services/mess_cloud_service.dart';
 import '../theme.dart';
 import '../widgets/app_widgets.dart';
 import 'members_dialog.dart';
+import 'turn_card.dart';
 
 /// Who is in the mess, and (for the owner) how to let more people in.
 class MembersScreen extends ConsumerWidget {
@@ -30,7 +31,9 @@ class MembersScreen extends ConsumerWidget {
         padding: const EdgeInsets.all(16),
         children: [
           MessSummaryCard(mess: mess),
-          const SizedBox(height: 20),
+          const SizedBox(height: 14),
+          const TurnCard(),
+          const SizedBox(height: 22),
           Row(
             children: [
               Expanded(

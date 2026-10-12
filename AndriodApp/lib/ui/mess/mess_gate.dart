@@ -7,7 +7,6 @@ import '../../providers.dart';
 import '../../services/mess_cloud_service.dart';
 import '../theme.dart';
 import '../widgets/app_widgets.dart';
-import 'member_home_screen.dart';
 
 /// Decides what a signed-in person sees next.
 ///
@@ -42,10 +41,10 @@ class _MessGateState extends ConsumerState<MessGate> {
           }
         });
       }
-      // The owner gets the full app. A member gets only their mess, its people
-      // and sign-out, because the expense data still lives on the owner's
-      // device and showing it here would present one person's figures as shared.
-      return mess.isOwner ? const HomeShell() : const MemberHomeScreen();
+      // Everyone in the mess gets the same full app. Roles decide what they may
+      // change, not which screens they may open: a member sees the same home,
+      // menus, collection, reports and settings as the owner.
+      return const HomeShell();
     }
 
     return active.when(

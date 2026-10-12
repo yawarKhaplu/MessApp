@@ -16,7 +16,7 @@ class AppDb {
     final today = _todayKey();
     return openDatabase(
       path,
-      version: 6,
+      version: 7,
       onUpgrade: (db, oldVersion, newVersion) async {
         // v2: track which member cooked/paid for each expense,
         // and allow a daily budget override in settings.
@@ -46,6 +46,19 @@ class AppDb {
         if (oldVersion < 6) {
           await db.execute(
               'ALTER TABLE other_categories ADD COLUMN monthly_budget REAL NOT NULL DEFAULT 0');
+        }
+        // v7: members link to the mess roster by email.
+        //
+        // The roster itself lives in Firestore; this column is only the link, so
+        // money recorded against a person cannot be orphaned when the shared
+        // roster changes. Nullable, because a row added before this version has
+        // no known email.
+        if (oldVersion < 7) {
+          await db.execute('ALTER TABLE members ADD COLUMN email TEXT');
+          // A plain unique index would reject the empty strings that every
+          // pre-existing row now has, so index the coalesced value instead.
+          await db.execute(
+              'CREATE UNIQUE INDEX idx_members_email ON members(COALESCE(email, \'\'))');
         }
       },
       onCreate: (db, version) async {
@@ -86,7 +99,8 @@ class AppDb {
         await db.execute('''
           CREATE TABLE members (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL
+            name TEXT NOT NULL,
+            email TEXT
           )
         ''');
         await db.execute('''
@@ -159,6 +173,11 @@ class AppDb {
 
     // Default settings row.
     await db.insert('settings', {'id': 1});
+
+    // Same link the v7 migration creates, so a fresh install and an upgraded
+    // one end up with an identical schema.
+    await db.execute(
+        'CREATE UNIQUE INDEX idx_members_email ON members(COALESCE(email, \'\'))');
 
     // Cooking rotation starts today with the first member.
     await _createRotation(db, _todayKey());

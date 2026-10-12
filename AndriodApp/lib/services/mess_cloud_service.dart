@@ -2,6 +2,11 @@ import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
+import 'collection_cloud_service.dart';
+import 'expense_cloud_service.dart';
+import 'menu_cloud_service.dart';
 
 /// Roles a person can hold in a mess.
 enum MessRole {
@@ -44,6 +49,86 @@ class MessMember {
   }
 }
 
+/// One day of the cooking turn.
+class TurnEntry {
+  final DateTime date;
+  final MessMember member;
+
+  const TurnEntry(this.date, this.member);
+}
+
+/// Whose turn it is to cook, for everyone in the mess.
+///
+/// Computed from the mess document rather than stored per day, because the
+/// schedule is a pure function of the roster and one anchor. That keeps a single
+/// source of truth: change the anchor or the roster and every day follows,
+/// instead of a stored list that can disagree with the roster it was built from.
+class MessTurn {
+  /// Everyone in turn order.
+  final List<MessMember> order;
+
+  /// Who cooks today, or null when the mess has no members yet.
+  final MessMember? today;
+
+  /// Who cooks tomorrow.
+  final MessMember? next;
+
+  /// 1-based position of [today] in the current round.
+  final int positionInRound;
+
+  /// How many days one full round takes.
+  final int roundLength;
+
+  /// The day the cycle is anchored on.
+  final DateTime? anchorDate;
+
+  /// Today plus the coming days.
+  final List<TurnEntry> upcoming;
+
+  /// False until someone picks an anchor by hand, which tells the screen to say
+  /// the schedule is a suggestion rather than a decision.
+  final bool isManual;
+
+  const MessTurn({
+    required this.order,
+    required this.today,
+    required this.next,
+    required this.positionInRound,
+    required this.roundLength,
+    required this.anchorDate,
+    required this.upcoming,
+    required this.isManual,
+  });
+
+  const MessTurn.empty()
+      : order = const [],
+        today = null,
+        next = null,
+        positionInRound = 0,
+        roundLength = 0,
+        anchorDate = null,
+        upcoming = const [],
+        isManual = false;
+
+  bool get hasMembers => order.isNotEmpty;
+
+  /// True when today is this person's turn. Used to decide who may add an entry
+  /// for today, so it must answer exactly as the schedule does.
+  bool isToday(MessMember member) => isTodayFor(member.email);
+
+  /// True when the turn belongs to [email].
+  ///
+  /// Matched on the lowercased address, because Google returns an account's email
+  /// exactly as it is stored and may capitalise it. Comparing raw would leave
+  /// someone unable to record their own turn.
+  bool isTodayFor(String email) {
+    final cook = today;
+    if (cook == null) return false;
+    final lower = email.trim().toLowerCase();
+    return lower.isNotEmpty && lower == cook.email.trim().toLowerCase();
+  }
+}
+
 /// A mess the signed-in person belongs to.
 class Mess {
   final String id;
@@ -62,7 +147,15 @@ class Mess {
   /// document read returns both the mess and its members.
   final List<MessMember> members;
 
-  const Mess({
+  /// The shared cooking turn, derived from [members] and the mess's anchor.
+  ///
+  /// Worked out on first use and then reused. Not const: the schedule depends on
+  /// today's date, so it cannot be a compile-time value.
+  MessTurn? _turnCache;
+
+  MessTurn get turn => _turnCache ??= _computeTurn();
+
+  Mess({
     required this.id,
     required this.name,
     required this.ownerUid,
@@ -70,18 +163,52 @@ class Mess {
     this.location,
     required this.myRole,
     this.members = const [],
-  });
+    Map<dynamic, dynamic>? rotation,
+  }) : _rotation = rotation;
 
-  factory Mess.fromDoc(
-    DocumentSnapshot<Map<String, dynamic>> doc, {
+  final Map<dynamic, dynamic>? _rotation;
+
+  /// Builds a Mess from raw fields, bypassing a Firestore snapshot.
+  ///
+  /// Exists so the turn arithmetic can be tested without a live database. The
+  /// snapshot path in [Mess.fromDoc] and this share the same field shapes, so
+  /// the tests exercise the real mapping rather than a copy of it.
+  @visibleForTesting
+  factory Mess.fromMapForTest({
+    required String id,
+    required String name,
     required String role,
+    required Map<String, dynamic> members,
+    Map<String, dynamic>? rotation,
   }) {
-    final data = doc.data() ?? const <String, dynamic>{};
-    final rawMembers =
-        Map<dynamic, dynamic>.from((data['members'] as Map?) ?? const {});
+    return Mess._fromFields(
+      id: id,
+      name: name,
+      ownerUid: '',
+      joinCode: '',
+      location: null,
+      role: role,
+      members: members,
+      rotation: rotation,
+    );
+  }
 
+  /// The single place a mess is assembled from raw fields.
+  ///
+  /// [Mess.fromDoc] and the test constructor both go through here, so the roster
+  /// cannot be ordered one way in the app and another way in the tests.
+  factory Mess._fromFields({
+    required String id,
+    required String name,
+    required String ownerUid,
+    required String joinCode,
+    required String? location,
+    required String role,
+    required Map<dynamic, dynamic> members,
+    Map<dynamic, dynamic>? rotation,
+  }) {
     final people = <MessMember>[];
-    for (final entry in rawMembers.entries) {
+    for (final entry in members.entries) {
       final seat = entry.value;
       if (seat is Map) {
         people.add(MessMember.fromEntry(
@@ -90,26 +217,124 @@ class Mess {
         ));
       }
     }
-    // Owner first, then alphabetically, so the list never reshuffles as seats
-    // are added.
+    // Owner first, then alphabetically. Ascending by role index, since
+    // MessRole.owner is 0.
     people.sort((a, b) {
-      final byRole = b.role.index.compareTo(a.role.index);
+      final byRole = a.role.index.compareTo(b.role.index);
       if (byRole != 0) return byRole;
       return a.email.compareTo(b.email);
     });
 
     return Mess(
+      id: id,
+      name: name,
+      ownerUid: ownerUid,
+      joinCode: joinCode,
+      location: location,
+      myRole: role,
+      members: people,
+      rotation: rotation,
+    );
+  }
+
+  factory Mess.fromDoc(
+    DocumentSnapshot<Map<String, dynamic>> doc, {
+    required String role,
+  }) {
+    final data = doc.data() ?? const <String, dynamic>{};
+
+    return Mess._fromFields(
       id: doc.id,
       name: (data['name'] as String?) ?? 'Mess',
       ownerUid: (data['ownerUid'] as String?) ?? '',
       joinCode: (data['joinCode'] as String?) ?? '',
       location: data['location'] as String?,
-      myRole: role,
-      members: people,
+      role: role,
+      members: Map<dynamic, dynamic>.from(
+        (data['members'] as Map?) ?? const {},
+      ),
+      rotation: data['rotation'] is Map
+          ? Map<dynamic, dynamic>.from(data['rotation'] as Map)
+          : null,
     );
   }
 
   bool get isOwner => myRole == MessRole.owner.wire;
+
+  /// Works out whose turn it is.
+  ///
+  /// Deliberately the same rule as the offline rotation: an anchor day plus a
+  /// position, advancing one member per day. Storing only the anchor means the
+  /// schedule can never drift out of step with the roster — add someone and the
+  /// round simply gets longer.
+  MessTurn _computeTurn() {
+    if (members.isEmpty) return const MessTurn.empty();
+
+    // Turn order follows the saved order where it still matches the roster, then
+    // appends anyone new at the end, so removing someone cannot break the cycle.
+    final saved = <String>[
+      for (final e in (_rotation?['order'] as List?) ?? const [])
+        '${e}'.toLowerCase(),
+    ];
+
+    final order = <MessMember>[];
+    for (final email in saved) {
+      for (final m in members) {
+        if (m.email.toLowerCase() == email) {
+          order.add(m);
+          break;
+        }
+      }
+    }
+    for (final m in members) {
+      if (!order.any((o) => o.email.toLowerCase() == m.email.toLowerCase())) {
+        order.add(m);
+      }
+    }
+
+    final n = order.length;
+    final today = _dateOnly(DateTime.now());
+
+    final anchor = _parseDate(_rotation?['anchorDate'] as String?) ?? today;
+    final anchorEmail = (_rotation?['anchorEmail'] as String?)?.toLowerCase();
+
+    // Where the anchor sits in the current order. If that person has left, fall
+    // back to the start rather than failing to produce a schedule at all.
+    var anchorIndex = anchorEmail == null
+        ? 0
+        : order.indexWhere((m) => m.email.toLowerCase() == anchorEmail);
+    if (anchorIndex < 0) anchorIndex = 0;
+
+    var idx = (anchorIndex + today.difference(anchor).inDays) % n;
+    if (idx < 0) idx += n;
+
+    const lookahead = 7;
+    final upcoming = <TurnEntry>[];
+    for (var i = 0; i < lookahead; i++) {
+      var k = (idx + i) % n;
+      if (k < 0) k += n;
+      upcoming.add(TurnEntry(today.add(Duration(days: i)), order[k]));
+    }
+
+    return MessTurn(
+      order: order,
+      today: order[idx],
+      next: order[(idx + 1) % n],
+      positionInRound: idx + 1,
+      roundLength: n,
+      anchorDate: anchor,
+      upcoming: upcoming,
+      isManual: _rotation?['manual'] == true,
+    );
+  }
+
+  static DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
+
+  static DateTime? _parseDate(String? value) {
+    if (value == null || value.isEmpty) return null;
+    final parsed = DateTime.tryParse(value);
+    return parsed == null ? null : _dateOnly(parsed);
+  }
 }
 
 class CloudMessage implements Exception {
@@ -416,6 +641,588 @@ class MessCloudService {
       throw CloudMessage(_friendly(e));
     }
   }
+
+  // ---- Expenses ----
+
+  /// Expenses the caller may read, newest day first.
+  ///
+  /// Filtered on `visibleTo`, which every expense is written with. That is the
+  /// only shape of query these rules can prove, and it returns the same entries
+  /// for the owner and for a member.
+  Future<List<CloudExpense>> expenses(
+    String messId,
+    String month,
+  ) async {
+    final uid = _user?.uid;
+    if (uid == null) return const [];
+
+    final snap = await _db
+        .collection('$_messes/$messId/expenses')
+        .where('visibleTo', arrayContains: uid)
+        .where('month', isEqualTo: month)
+        .get();
+
+    final list = snap.docs
+        .map((d) => CloudExpense.fromDoc(d.id, d.data()))
+        .toList();
+
+    list.sort((a, b) {
+      final byDate = b.date.compareTo(a.date);
+      if (byDate != 0) return byDate;
+      // Same day: newest entry first.
+      return (b.createdAt ?? DateTime(0)).compareTo(a.createdAt ?? DateTime(0));
+    });
+
+    return list;
+  }
+
+  /// Every expense the caller may read, across all months.
+  ///
+  /// Reports need a date range that can cross months, and reading each month in
+  /// turn is simpler than one query with a range it may not be able to prove.
+  Future<List<CloudExpense>> allExpenses(
+    String messId,
+    List<String> months,
+  ) async {
+    final all = <CloudExpense>[];
+    for (final month in months) {
+      all.addAll(await expenses(messId, month));
+    }
+
+    all.sort((a, b) {
+      final byDate = b.date.compareTo(a.date);
+      if (byDate != 0) return byDate;
+      return (b.createdAt ?? DateTime(0)).compareTo(a.createdAt ?? DateTime(0));
+    });
+
+    return all;
+  }
+
+  /// Saves one day's entry.
+  ///
+  /// [visibleTo] carries every uid allowed to read it, which is what makes the
+  /// read query provable. [cookEmail] is who cooked, which is not necessarily the
+  /// person recording it.
+  Future<String> addExpense({
+    required String messId,
+    required String date,
+    required String menuName,
+    required String cookEmail,
+    required List<CloudExpenseItem> items,
+    required List<MessMember> roster,
+  }) async {
+    final uid = _user?.uid;
+    if (uid == null) throw const CloudMessage('Sign in again.');
+
+    final total = items.fold<double>(0, (s, i) => s + i.lineTotal);
+    final ref = _db.collection('$_messes/$messId/expenses').doc();
+
+    try {
+      await ref.set({
+        'month': monthOf(date),
+        'date': date,
+        // Kept as a timestamp as well, because the rules can only compare a
+        // timestamp against request.time. The text date is what the app reads.
+        'dateTime': Timestamp.fromDate(DateTime.parse(date)),
+        'menuName': menuName,
+        'total': total,
+        'cookEmail': cookEmail.trim().toLowerCase(),
+        'recordedBy': _myEmail,
+        'createdAt': FieldValue.serverTimestamp(),
+        'visibleTo': [for (final m in roster) m.uid],
+        'items': {for (final i in items) i.id: i.toDoc()},
+      });
+      return ref.id;
+    } on FirebaseException catch (e) {
+      if (e.code == 'permission-denied') {
+        throw const CloudMessage(
+          'You can only record a meal on your own cooking turn.',
+        );
+      }
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Edits an existing entry. Owner only.
+  Future<void> updateExpense({
+    required String messId,
+    required String expenseId,
+    required String date,
+    required String menuName,
+    required String cookEmail,
+    required List<CloudExpenseItem> items,
+  }) async {
+    final total = items.fold<double>(0, (s, i) => s + i.lineTotal);
+    try {
+      await _db.collection('$_messes/$messId/expenses').doc(expenseId).set({
+        'date': date,
+        'dateTime': Timestamp.fromDate(DateTime.parse(date)),
+        'menuName': menuName,
+        'total': total,
+        'cookEmail': cookEmail.trim().toLowerCase(),
+        'items': {for (final i in items) i.id: i.toDoc()},
+      }, SetOptions(merge: true));
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Removes an entry. Owner only.
+  Future<void> deleteExpense({
+    required String messId,
+    required String expenseId,
+  }) async {
+    try {
+      await _db
+          .collection('$_messes/$messId/expenses')
+          .doc(expenseId)
+          .delete();
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  // ---- Menu catalogue ----
+
+  /// The whole catalogue, or an empty one when the mess has none yet.
+  ///
+  /// The roster already lives on the mess document, and so does the catalogue:
+  /// putting the menus in the same place means one read covers both, and keeps
+  /// the owner-only write rule that already protects the mess document.
+  Future<MenuCatalogue> menus(String messId) async {
+    final doc = await _db.collection(_messes).doc(messId).get();
+    if (!doc.exists) return const MenuCatalogue.empty();
+
+    final raw = Map<dynamic, dynamic>.from(
+        (doc.data()?['menus'] as Map?) ?? const {});
+
+    final list = <CloudMenu>[];
+    for (final entry in raw.entries) {
+      final value = entry.value;
+      if (value is Map) {
+        list.add(CloudMenu.fromEntry(
+          '${entry.key}',
+          Map<dynamic, dynamic>.from(value),
+        ));
+      }
+    }
+    list.sort(compareMenus);
+
+    return MenuCatalogue(list);
+  }
+
+  /// Saves the whole catalogue in one write.
+  ///
+  /// Sorted on the way out, so a reorder is stored as the order the user sees
+  /// rather than depending on how the list happened to be assembled.
+  Future<void> saveMenus(
+    String messId,
+    List<CloudMenu> menus,
+  ) async {
+    try {
+      await _db.collection(_messes).doc(messId).update({
+        'menus': {for (final m in sortMenus(menus)) m.id: m.toEntry()},
+      });
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Adds a menu, optionally with the starter menus when the mess has none.
+  Future<void> addMenu(
+    String messId,
+    String name, {
+    List<CloudMenu>? existing,
+  }) async {
+    final clean = name.trim();
+    if (clean.isEmpty) {
+      throw const CloudMessage('Give the menu a name.');
+    }
+
+    final current = existing ?? (await menus(messId)).menus;
+    if (current.any((m) => m.name.toLowerCase() == clean.toLowerCase())) {
+      throw const CloudMessage('A menu with that name already exists.');
+    }
+
+    await saveMenus(messId, [
+      ...current,
+      CloudMenu(id: newMenuId(), name: clean, order: current.length),
+    ]);
+  }
+
+  Future<void> renameMenu(
+    String messId,
+    List<CloudMenu> existing,
+    String menuId,
+    String name,
+  ) async {
+    final clean = name.trim();
+    if (clean.isEmpty) {
+      throw const CloudMessage('Give the menu a name.');
+    }
+
+    await saveMenus(messId, [
+      for (final m in existing)
+        if (m.id == menuId) m.copyWith(name: clean) else m,
+    ]);
+  }
+
+  Future<void> deleteMenu(
+    String messId,
+    List<CloudMenu> existing,
+    String menuId,
+  ) async {
+    await saveMenus(
+        messId, existing.where((m) => m.id != menuId).toList());
+  }
+
+  /// Adds an item to a menu.
+  Future<void> addMenuItem(
+    String messId,
+    List<CloudMenu> existing,
+    String menuId, {
+    required String name,
+    double defaultPrice = 0,
+  }) async {
+    final clean = name.trim();
+    if (clean.isEmpty) {
+      throw const CloudMessage('Give the item a name.');
+    }
+
+    await saveMenus(messId, [
+      for (final m in existing)
+        if (m.id == menuId)
+          m.copyWith(items: [
+            ...m.items,
+            CloudMenuItem(
+              id: newMenuItemId(),
+              name: clean,
+              defaultPrice: defaultPrice,
+              // Placed at the end so a new item never reorders the rest.
+              order: m.items.isEmpty ? 0 : m.items.last.order + 1,
+            ),
+          ])
+        else
+          m,
+    ]);
+  }
+
+  Future<void> updateMenuItem(
+    String messId,
+    List<CloudMenu> existing,
+    String menuId,
+    String itemId, {
+    required String name,
+    double defaultPrice = 0,
+  }) async {
+    final clean = name.trim();
+    if (clean.isEmpty) {
+      throw const CloudMessage('Give the item a name.');
+    }
+
+    await saveMenus(messId, [
+      for (final m in existing)
+        if (m.id == menuId)
+          m.copyWith(items: [
+            for (final i in m.items)
+              if (i.id == itemId)
+                i.copyWith(name: clean, defaultPrice: defaultPrice)
+              else
+                i,
+          ])
+        else
+          m,
+    ]);
+  }
+
+  Future<void> deleteMenuItem(
+    String messId,
+    List<CloudMenu> existing,
+    String menuId,
+    String itemId,
+  ) async {
+    await saveMenus(messId, [
+      for (final m in existing)
+        if (m.id == menuId)
+          m.copyWith(items: m.items.where((i) => i.id != itemId).toList())
+        else
+          m,
+    ]);
+  }
+
+  /// Saves a new item order after a drag.
+  ///
+  /// Only the order changes, so nothing typed by the user can be lost by a
+  /// reorder the way a full rewrite could.
+  Future<void> reorderMenuItems(
+    String messId,
+    List<CloudMenu> existing,
+    String menuId,
+    List<String> itemIds,
+  ) async {
+    final position = <String, int>{
+      for (var i = 0; i < itemIds.length; i++) itemIds[i]: i,
+    };
+
+    await saveMenus(messId, [
+      for (final m in existing)
+        if (m.id == menuId)
+          m.copyWith(items: [
+            for (final i in m.items)
+              CloudMenuItem(
+                id: i.id,
+                name: i.name,
+                defaultPrice: i.defaultPrice,
+                order: position[i.id] ?? i.order,
+              ),
+          ])
+        else
+          m,
+    ]);
+  }
+
+  // ---- Collections ----
+
+  /// Reads every member's collection for a month.
+  ///
+  /// One document read per member rather than a query, so the security rule can
+  /// be proven and Firestore cannot deny it. A mess is a handful of people
+  /// sharing a kitchen, so a few reads cost less than the complexity of making
+  /// a query provable.
+  Future<Map<String, MemberCollection>> collectionsFor(
+    String messId,
+    String month,
+    List<MessMember> roster,
+  ) async {
+    final result = <String, MemberCollection>{};
+
+    for (final member in roster) {
+      final email = member.email.trim().toLowerCase();
+      if (email.isEmpty) continue;
+      result[email] = await collectionFor(messId, email, month);
+    }
+
+    return result;
+  }
+
+  /// One member's collection for a month. Missing means no share is set.
+  Future<MemberCollection> collectionFor(
+    String messId,
+    String email,
+    String month,
+  ) async {
+    final doc = await _db
+        .collection('$_messes/$messId/collections')
+        .doc(collectionDocId(email, month))
+        .get();
+
+    if (!doc.exists) {
+      return MemberCollection(email: email, month: month, amountDue: 0);
+    }
+
+    final data = doc.data() ?? const {};
+
+    // Payments live in a map. An earlier build wrote each one as a field
+    // literally NAMED "payments.<key>" rather than an entry inside the map, so
+    // both shapes are read here. Without this, payments already recorded on that
+    // build would stay invisible, which is worse than a duplicate.
+    final raw =
+        Map<dynamic, dynamic>.from((data['payments'] as Map?) ?? const {});
+    final payments = <CloudPayment>[];
+
+    void addEntry(String id, Map<dynamic, dynamic> p) {
+      payments.add(CloudPayment(
+        id: id,
+        amount: (p['amount'] as num?)?.toDouble() ?? 0,
+        date: DateTime.tryParse('${p['date'] ?? ''}'),
+        recordedBy: p['recordedBy'] as String?,
+      ));
+    }
+
+    for (final entry in raw.entries) {
+      final p = entry.value;
+      if (p is Map) addEntry('${entry.key}', Map<dynamic, dynamic>.from(p));
+    }
+
+    for (final entry in data.entries) {
+      final key = entry.key;
+      if (key is String &&
+          key.startsWith('payments.') &&
+          entry.value is Map) {
+        addEntry(
+          key.substring('payments.'.length),
+          Map<dynamic, dynamic>.from(entry.value as Map),
+        );
+      }
+    }
+
+    // Newest first. Null dates sort last so a malformed row does not jump to the
+    // top of the history.
+    payments.sort((a, b) {
+      if (a.date == null) return 1;
+      if (b.date == null) return -1;
+      return b.date!.compareTo(a.date!);
+    });
+
+    return MemberCollection(
+      email: email,
+      month: month,
+      amountDue: (data['amountDue'] as num?)?.toDouble() ?? 0,
+      payments: payments,
+    );
+  }
+
+  /// Sets one member's monthly share. Owner only.
+  Future<void> setMonthlyShare({
+    required String messId,
+    required String email,
+    required String month,
+    required double amount,
+  }) async {
+    try {
+      // Merge, so setting a share never discards payments already recorded
+      // against it.
+      await _db
+          .collection('$_messes/$messId/collections')
+          .doc(collectionDocId(email, month))
+          .set({
+        'email': email.trim().toLowerCase(),
+        'month': month,
+        'amountDue': amount,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Sets the same share for everybody in the mess. Owner only.
+  Future<void> setMonthlyShareForAll({
+    required String messId,
+    required String month,
+    required double amount,
+    required List<MessMember> roster,
+  }) async {
+    for (final member in roster) {
+      await setMonthlyShare(
+        messId: messId,
+        email: member.email,
+        month: month,
+        amount: amount,
+      );
+    }
+  }
+
+  /// Records a payment against a member's month. Owner only.
+  ///
+  /// The payment is appended under a key generated from the clock rather than
+  /// stored as a list index, so two payments recorded at the same moment cannot
+  /// overwrite one another.
+  Future<void> addCollectionPayment({
+    required String messId,
+    required String email,
+    required String month,
+    required double amount,
+    required String date,
+  }) async {
+    if (amount <= 0) {
+      throw const CloudMessage('Enter an amount greater than zero.');
+    }
+
+    try {
+      final ref = _db
+          .collection('$_messes/$messId/collections')
+          .doc(collectionDocId(email, month));
+
+      // Create the document if it is missing, then add the payment as a proper
+      // nested entry using a FieldPath.
+      //
+      // The obvious version of this — a 'payments.<key>' string key inside a
+      // merged set — silently writes a field literally NAMED "payments.<key>"
+      // rather than an entry in the payments map, so the payment saves and the
+      // history then reads as empty. A FieldPath is the only way to add one
+      // entry to a map without first reading the whole map.
+      await ref.set({
+        'email': email.trim().toLowerCase(),
+        'month': month,
+        'amountDue': 0,
+      }, SetOptions(merge: true));
+
+      await ref.update({
+          FieldPath(['payments', '${DateTime.now().microsecondsSinceEpoch}']): {
+            'amount': amount,
+            'date': date,
+            'recordedBy': _myEmail,
+            'at': FieldValue.serverTimestamp(),
+          }
+        });
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  /// Removes a payment. Owner only.
+  Future<void> removeCollectionPayment({
+    required String messId,
+    required String email,
+    required String month,
+    required String paymentId,
+  }) async {
+    try {
+      await _db
+          .collection('$_messes/$messId/collections')
+          .doc(collectionDocId(email, month))
+          // A FieldPath for the same reason as the write: a string key of
+          // "payments.<id>" would target a field of that name instead of the
+          // entry inside the map.
+          .update({FieldPath(['payments', paymentId]): FieldValue.delete()});
+    } on FirebaseException catch (e) {
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  // ---- Cooking turn ----
+
+  /// Sets whose turn it is. Owner only.
+  ///
+  /// Stores the anchor rather than a list of dates: the schedule is then always
+  /// derived from the roster, so it cannot disagree with who is actually in the
+  /// mess. Anyone added or removed reshapes the cycle automatically.
+  ///
+  /// [order] is the preferred cooking order, as member emails.
+  Future<void> setTurn({
+    required String messId,
+    required DateTime anchorDate,
+    required String anchorEmail,
+    List<String> order = const [],
+  }) async {
+    final clean = anchorEmail.trim().toLowerCase();
+    if (!clean.contains('@')) {
+      throw const CloudMessage('Pick who should have the bari today.');
+    }
+
+    try {
+      await _db.collection(_messes).doc(messId).update({
+        'rotation': {
+          'anchorDate': _dateKey(anchorDate),
+          'anchorEmail': clean,
+          'order': order.map((e) => e.trim().toLowerCase()).toList(),
+          'manual': true,
+          'updatedBy': _myEmail,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+      });
+    } on FirebaseException catch (e) {
+      // Only the owner may change the turn. Reported plainly, because the owner
+      // action button is the only place this is called from.
+      throw CloudMessage(_friendly(e));
+    }
+  }
+
+  static String _dateKey(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-'
+      '${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')}';
 
   // ---- Helpers ----
 

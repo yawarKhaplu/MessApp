@@ -4,9 +4,12 @@ import 'package:intl/intl.dart';
 
 import '../data/models.dart';
 import '../providers.dart';
+import '../services/collection_cloud_service.dart';
+import '../services/mess_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'member_detail_screen.dart';
+import 'mess/members_screen.dart';
 import 'widgets/text_input_dialog.dart';
 
 /// Monthly collection (PRD 5.4): members, monthly share, paid /
@@ -22,19 +25,21 @@ class CollectionScreen extends ConsumerStatefulWidget {
 class _CollectionScreenState extends ConsumerState<CollectionScreen> {
   double? _share;
 
-  Future<void> _addMember() async {
-    final name = await showDialog<String>(
-      context: context,
-      builder: (_) => const TextInputDialog(
-        title: 'Add member',
-        hint: 'Member name',
-        confirmLabel: 'Add',
-      ),
+  /// Opens the mess roster, which is the live list in Firestore.
+///
+/// Adding somebody here used to write a name into this device's own database,
+/// which meant they were invisible to the rest of the mess and could not sign
+/// in. Members are now real mess members with an email, so this goes to the
+/// screen that manages them.
+Future<void> _manageMembers() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const MembersScreen()),
     );
-    if (name != null && name.trim().isNotEmpty) {
-      await ref.read(membersProvider.notifier).add(name.trim());
-      await refreshTotals(ref);
-    }
+    // The roster is shared, so anything changed there has to be reflected back
+    // into this screen's own data.
+    ref.invalidate(activeMessProvider);
+    ref.invalidate(membersProvider);
+    ref.invalidate(monthCollectionsProvider);
   }
 
   Future<void> _renameMember(Member member) async {
@@ -83,21 +88,31 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
         numeric: true,
       ),
     );
-    if (value != null) {
-      final amount =
-          double.tryParse(value.replaceAll(',', '')) ?? 0;
-      if (amount > 0) {
-        setState(() => _share = amount);
-        final month = monthKey(ref.read(selectedMonthProvider));
-        final members =
-            await ref.read(membersProvider.future);
-        for (final m in members) {
-          await ref
-              .read(repositoryProvider)
-              .setMonthlyShare(m.id!, month, amount);
-        }
-        ref.invalidate(monthCollectionsProvider);
-      }
+    if (value == null || !mounted) return;
+
+    final amount = double.tryParse(value.replaceAll(',', '')) ?? 0;
+    if (amount <= 0) return;
+
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+
+    // Written to Firestore, so the share is the same for everyone in the mess
+    // rather than only on this device.
+    setState(() => _share = amount);
+    final month = monthKey(ref.read(selectedMonthProvider));
+
+    try {
+      await ref.read(messCloudServiceProvider).setMonthlyShareForAll(
+            messId: mess.id,
+            month: month,
+            amount: amount,
+            roster: mess.members,
+          );
+      ref.invalidate(sharedCollectionsProvider(month));
+    } on CloudMessage catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.text)));
     }
   }
 
@@ -115,9 +130,19 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final membersAsync = ref.watch(membersProvider);
-    final collections = ref.watch(monthCollectionsProvider);
+    final mess = ref.watch(activeMessProvider).valueOrNull;
     final month = ref.watch(selectedMonthProvider);
+    final monthKeyValue = monthKey(month);
+
+    // Collections are shared: read from Firestore, keyed by member email, so
+    // whoever records a payment and whoever is shown the figure are looking at
+    // the same numbers.
+    final shared = ref.watch(sharedCollectionsProvider(monthKeyValue));
+
+    // Collections belong to the owner. Members may browse every month and open
+    // any member to read the figures, but nothing on this tab writes.
+    final isOwner =
+        ref.watch(activeMessProvider).valueOrNull?.isOwner ?? false;
 
     final money =
         NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
@@ -126,10 +151,13 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
       appBar: AppBar(
         title: const Text('Collection'),
         actions: [
-          IconButton(
-              icon: const Icon(Icons.person_add),
-              tooltip: 'Add member',
-              onPressed: _addMember),
+          // Adding and removing people is the owner's call, and it happens on
+          // the shared roster rather than in this device's own table.
+          if (isOwner)
+            IconButton(
+                icon: const Icon(Icons.person_add),
+                tooltip: 'Add member to the mess',
+                onPressed: _manageMembers),
         ],
       ),
       body: RefreshIndicator(
@@ -150,8 +178,11 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
                       icon: const Icon(Icons.chevron_left),
                       onPressed: _prevMonth),
                   Expanded(
+                    // Tapping the month sets the shared monthly share, which is
+                    // an owner action. Members can still move between months to
+                    // read past figures.
                     child: InkWell(
-                      onTap: _setShare,
+                      onTap: isOwner ? _setShare : null,
                       borderRadius: BorderRadius.circular(12),
                       child: Column(
                         children: [
@@ -167,7 +198,7 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
                                   style: TextStyle(color: AppTheme.textSecondary)),
                               Text(
                                 _share == null
-                                    ? 'set monthly share'
+                                    ? 'not set'
                                     : money.format(_share!),
                                 style: const TextStyle(
                                     color: AppTheme.primary,
@@ -188,29 +219,27 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
             const SizedBox(height: 12),
 
             // Summary
-            collections.when(
+            shared.when(
               loading: () => const Padding(
                 padding: EdgeInsets.all(16),
                 child:
                     Center(child: CircularProgressIndicator()),
               ),
               error: (e, _) => Center(child: Text('Error: $e')),
-              data: (rows) {
+              data: (byEmail) {
                 // Worked out per member and floored at zero, so someone
                 // paying extra never cancels what the others still owe.
                 double totalDue = 0;
                 double totalPaid = 0;
                 double stillDue = 0;
                 double credit = 0;
-                for (final r in rows) {
-                  final due = (r['amount_due'] as num?)?.toDouble() ?? 0;
-                  final paid = (r['paid'] as num?)?.toDouble() ?? 0;
-                  totalDue += due;
-                  totalPaid += paid;
-                  if (due > paid) {
-                    stillDue += due - paid;
+                for (final c in byEmail.values) {
+                  totalDue += c.amountDue;
+                  totalPaid += c.paid;
+                  if (c.amountDue > c.paid) {
+                    stillDue += c.amountDue - c.paid;
                   } else {
-                    credit += paid - due;
+                    credit += c.paid - c.amountDue;
                   }
                 }
 
@@ -284,37 +313,41 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
             const SizedBox(height: 16),
 
             // Members
-            membersAsync.when(
-              loading: () => const Center(
-                  child: CircularProgressIndicator()),
-              error: (e, _) => Center(child: Text('Error: $e')),
-              data: (members) {
-                if (members.isEmpty) {
-                  return const Center(
-                    child: Text(
-                        'No members yet. Tap + to add roommates.'),
-                  );
-                }
-                return FutureBuilder<List<Map<String, Object?>>>(
-                  future: ref
-                      .read(repositoryProvider)
-                      .getMonthCollections(monthKey(month)),
-                  builder: (context, snap) {
-                    if (!snap.hasData) {
-                      return const Center(
-                          child: CircularProgressIndicator());
-                    }
-                    final rows = snap.data!;
-                    return Column(
-                      children: [
-                        for (final member in members)
-                          _memberCard(member, rows, money, month),
-                      ],
-                    );
-                  },
-                );
-              },
-            ),
+            // Members, straight from the shared roster so the list cannot drift from who
+            // is actually in the mess.
+            if (mess == null)
+              const Center(child: CircularProgressIndicator())
+            else if (mess.members.isEmpty)
+              Center(
+                child: Text(
+                  'No members yet. Tap the person icon to add roommates to the '
+                  'mess.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              )
+            else
+              shared.when(
+                loading: () =>
+                    const Center(child: CircularProgressIndicator()),
+                error: (e, _) => Center(child: Text('Error: $e')),
+                data: (byEmail) => Column(
+                  children: [
+                    for (final member in mess.members)
+                      _memberCard(
+                        member,
+                        byEmail[member.email.trim().toLowerCase()] ??
+                            MemberCollection(
+                              email: member.email,
+                              month: monthKeyValue,
+                              amountDue: 0,
+                            ),
+                        money,
+                        month,
+                        isOwner: isOwner,
+                      ),
+                  ],
+                ),
+              ),
           ],
         ),
       ),
@@ -333,17 +366,15 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
         ],
       );
 
-  Widget _memberCard(Member member,
-      List<Map<String, Object?>> rows, NumberFormat money, DateTime month) {
-    Map<String, Object?>? row;
-    for (final r in rows) {
-      if (r['member_id'] == member.id) {
-        row = r;
-        break;
-      }
-    }
-    final due = (row?['amount_due'] as num?)?.toDouble() ?? 0;
-    final paid = (row?['paid'] as num?)?.toDouble() ?? 0;
+  Widget _memberCard(
+    MessMember member,
+    MemberCollection collection,
+    NumberFormat money,
+    DateTime month, {
+    required bool isOwner,
+  }) {
+    final due = collection.amountDue;
+    final paid = collection.paid;
     final remaining = due - paid;
     final overpaid = paid - due;
 
@@ -366,13 +397,16 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
       color = AppTheme.error;
     }
 
-    return Padding(
+    final label = member.name ?? member.email;
+                return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: AppCard(
         onTap: () {
           Navigator.of(context).push(MaterialPageRoute(
             builder: (_) => MemberDetailScreen(
-                member: member, month: month),
+                name: member.name ?? member.email,
+                email: member.email,
+                month: month),
           ));
         },
         child: Row(
@@ -388,7 +422,7 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
               ),
               child: Center(
                 child: Text(
-                  member.name.isNotEmpty ? member.name[0].toUpperCase() : '?',
+                  label.isNotEmpty ? label[0].toUpperCase() : '?',
                   style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.w700,
@@ -402,7 +436,7 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(member.name,
+                  Text(label,
                       style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 4),
                   Text(
@@ -426,16 +460,10 @@ class _CollectionScreenState extends ConsumerState<CollectionScreen> {
                 ],
               ],
             ),
-            PopupMenuButton<String>(
-              onSelected: (v) {
-                if (v == 'rename') _renameMember(member);
-                if (v == 'delete') _deleteMember(member);
-              },
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'rename', child: Text('Rename')),
-                PopupMenuItem(value: 'delete', child: Text('Remove')),
-              ],
-            ),
+            // No per-member rename or remove here. Those used to edit this device's own
+            // members table, which no longer backs this list — the roster comes
+            // from Firestore. Renaming or removing someone happens on the mess
+            // roster, reached from the app bar.
           ],
         ),
       ),

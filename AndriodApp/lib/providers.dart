@@ -3,7 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'data/models.dart';
 import 'data/repository.dart';
 import 'services/auth_service.dart';
+import 'services/collection_cloud_service.dart';
+import 'services/expense_cloud_service.dart';
 import 'services/mess_cloud_service.dart';
+import 'services/menu_cloud_service.dart';
 import 'services/notifications.dart';
 
 // ---------- Singletons ----------
@@ -51,6 +54,14 @@ final messMembersProvider = Provider<List<MessMember>>((ref) {
   return ref.watch(activeMessProvider).valueOrNull?.members ?? const [];
 });
 
+/// Whose turn it is to cook, for everyone in the mess.
+///
+/// Derived from the roster, so every member computes the same answer from the
+/// same document and no one has to be told.
+final messTurnProvider = Provider<MessTurn>((ref) {
+  return ref.watch(activeMessProvider).valueOrNull?.turn ?? const MessTurn.empty();
+});
+
 /// Role of the signed-in person in the open mess, or null when no mess is
 /// open yet.
 final myRoleProvider = Provider<MessRole?>((ref) {
@@ -94,42 +105,219 @@ final settingsProvider =
 
 // ---------- Menus ----------
 
-class MenusNotifier extends AsyncNotifier<List<Menu>> {
+/// The shared menu catalogue, read from Firestore.
+///
+/// Everyone in the mess cooks from the same menus. Menus are edited one at a
+/// time and are small, so the whole catalogue is held in memory and rewritten on
+/// each change rather than read item by item.
+class MenusNotifier extends AsyncNotifier<MenuCatalogue> {
+  MessCloudService get _cloud => ref.read(messCloudServiceProvider);
+
+  /// The open mess. Menus belong to it, so there is nothing to show without one.
+  String get _messId =>
+      ref.read(activeMessProvider).valueOrNull?.id ?? '';
+
   @override
-  Future<List<Menu>> build() => ref.read(repositoryProvider).getMenus();
+  Future<MenuCatalogue> build() async {
+    final mess = await ref.watch(activeMessProvider.future);
+    if (mess == null) return const MenuCatalogue.empty();
+    return ref.watch(messCloudServiceProvider).menus(mess.id);
+  }
+
+  /// Re-reads after a write, so what is on screen is what was actually saved.
+  Future<void> _reload() async {
+    if (_messId.isEmpty) {
+      state = AsyncData(const MenuCatalogue.empty());
+      return;
+    }
+    state = AsyncData(await _cloud.menus(_messId));
+  }
 
   Future<void> add(String name) async {
-    await ref.read(repositoryProvider).addMenu(name);
-    state = AsyncData(await ref.read(repositoryProvider).getMenus());
+    await _cloud.addMenu(_messId, name, existing: state.valueOrNull?.menus);
+    await _reload();
   }
 
-  Future<void> rename(int id, String name) async {
-    await ref.read(repositoryProvider).renameMenu(id, name);
-    state = AsyncData(await ref.read(repositoryProvider).getMenus());
+  Future<void> rename(String menuId, String name) async {
+    await _cloud.renameMenu(
+        _messId, state.valueOrNull?.menus ?? const [], menuId, name);
+    await _reload();
   }
 
-  Future<void> delete(int id) async {
-    await ref.read(repositoryProvider).deleteMenu(id);
-    state = AsyncData(await ref.read(repositoryProvider).getMenus());
+  Future<void> delete(String menuId) async {
+    await _cloud.deleteMenu(
+        _messId, state.valueOrNull?.menus ?? const [], menuId);
+    await _reload();
+  }
+
+  Future<void> addItem(String menuId, String name, double price) async {
+    await _cloud.addMenuItem(
+      _messId,
+      state.valueOrNull?.menus ?? const [],
+      menuId,
+      name: name,
+      defaultPrice: price,
+    );
+    await _reload();
+  }
+
+  Future<void> updateItem(String menuId, String itemId, String name,
+      double price) async {
+    await _cloud.updateMenuItem(
+      _messId,
+      state.valueOrNull?.menus ?? const [],
+      menuId,
+      itemId,
+      name: name,
+      defaultPrice: price,
+    );
+    await _reload();
+  }
+
+  Future<void> deleteItem(String menuId, String itemId) async {
+    await _cloud.deleteMenuItem(
+        _messId, state.valueOrNull?.menus ?? const [], menuId, itemId);
+    await _reload();
+  }
+
+  Future<void> reorderItems(String menuId, List<String> itemIds) async {
+    await _cloud.reorderMenuItems(
+        _messId, state.valueOrNull?.menus ?? const [], menuId, itemIds);
+    await _reload();
   }
 }
 
 final menusProvider =
-    AsyncNotifierProvider<MenusNotifier, List<Menu>>(MenusNotifier.new);
+    AsyncNotifierProvider<MenusNotifier, MenuCatalogue>(MenusNotifier.new);
 
-/// Item count per menu, so the menu list can show what each one contains.
-final menuItemCountsProvider =
-    FutureProvider.autoDispose<Map<int, int>>((ref) async {
-  ref.watch(dataVersionProvider);
-  ref.watch(menusProvider);
-  return ref.read(repositoryProvider).getMenuItemCounts();
+/// Item count per menu, derived from the catalogue already in memory.
+final menuItemCountsProvider = Provider<Map<String, int>>((ref) {
+  return ref.watch(menusProvider).valueOrNull?.itemCounts ?? const {};
 });
+
+// ---------- Collections (shared) ----------
+
+/// Monthly collections for every member, read from Firestore.
+///
+/// Keyed by member email so this lines up with the shared roster. Re-read when
+/// the month or the mess changes; anything that writes a payment invalidates it,
+/// so both people always see the same figures.
+final sharedCollectionsProvider =
+    FutureProvider.autoDispose.family<Map<String, MemberCollection>, String>(
+        (ref, month) async {
+  // Watched so a new member or a removed one is reflected immediately.
+  final mess = await ref.watch(activeMessProvider.future);
+  if (mess == null) return const {};
+
+  return ref
+      .read(messCloudServiceProvider)
+      .collectionsFor(mess.id, month, mess.members);
+});
+
+/// Who may change collection figures. Read from the membership document, never
+/// assumed from the UI.
+final canRecordCollectionsProvider = Provider<bool>((ref) {
+  return ref.watch(activeMessProvider).valueOrNull?.isOwner ?? false;
+});
+
+/// Who may record an expense for today's cook.
+///
+/// The owner can always record one. Anyone else can only do so on the day the
+/// turn says it is theirs, so the person who cooked is the one entering what was
+/// cooked, and nobody can quietly log meals on each other's behalf.
+///
+/// False while the mess is still loading, so the button never flashes into view
+/// before the answer is known.
+final canRecordTodaysCookProvider = Provider<bool>((ref) {
+  final mess = ref.watch(activeMessProvider).valueOrNull;
+  if (mess == null) return false;
+
+  if (mess.isOwner) return true;
+
+  final email = ref.watch(currentUserProvider).valueOrNull?.email;
+  if (email == null || email.trim().isEmpty) return false;
+
+  return mess.turn.isTodayFor(email);
+});
+
+// ---------- Expenses (shared) ----------
+
+/// Expenses for one month, read from Firestore.
+///
+/// Invalidated whenever anything is written, so the owner who records a meal and
+/// the member reading it see the same figures without pulling to refresh.
+final sharedExpensesProvider =
+    FutureProvider.autoDispose.family<List<CloudExpense>, String>((ref, month) async {
+  final mess = await ref.watch(activeMessProvider.future);
+  if (mess == null) return const [];
+  return ref.read(messCloudServiceProvider).expenses(mess.id, month);
+});
+
+/// Today's entries, newest first.
+final todayExpensesProvider = Provider<List<CloudExpense>>((ref) {
+  final month = monthKey(DateTime.now());
+  return ref.watch(sharedExpensesProvider(month)).valueOrNull ??
+      const <CloudExpense>[];
+});
+
+/// Today's spending, for the budget figures on Home.
+final todayExpenseTotalProvider = Provider<double>((ref) {
+  final today = monthKey(DateTime.now());
+  final all = ref.watch(sharedExpensesProvider(monthKey(DateTime.now())))
+      .valueOrNull ??
+      const <CloudExpense>[];
+  return totalBetween(all, today, today).total;
+});
+
+/// Records a meal. Owner, or the member whose turn it is.
+Future<String> saveExpense({
+  required WidgetRef ref,
+  required String date,
+  required String menuName,
+  required String cookEmail,
+  required List<CloudExpenseItem> items,
+}) async {
+  final mess = ref.read(activeMessProvider).valueOrNull;
+  if (mess == null) {
+    throw const CloudMessage('No mess is open yet.');
+  }
+
+  final id = await ref.read(messCloudServiceProvider).addExpense(
+        messId: mess.id,
+        date: date,
+        menuName: menuName,
+        cookEmail: cookEmail,
+        items: items,
+        roster: mess.members,
+      );
+
+  // Written to a month the entry may not fall in, so both are cleared rather
+  // than leaving a stale copy behind on whichever one the app was showing.
+  ref.invalidate(sharedExpensesProvider(monthOf(date)));
+  ref.invalidate(sharedExpensesProvider(monthKey(DateTime.now())));
+  return id;
+}
 
 // ---------- Members ----------
 
 class MembersNotifier extends AsyncNotifier<List<Member>> {
+  /// Mirrors the shared roster into the local table before reading it.
+  ///
+  /// Firestore decides who is in the mess. This table holds the money recorded
+  /// against each person, so it is synced from the roster on every load instead
+  /// of being a second, independent list of names. That is what makes the
+  /// Collection tab show the same people as the rest of the app.
   @override
-  Future<List<Member>> build() => ref.read(repositoryProvider).getMembers();
+  Future<List<Member>> build() async {
+    final repo = ref.read(repositoryProvider);
+
+    final mess = await ref.watch(activeMessProvider.future);
+    if (mess == null) return repo.getMembers();
+
+    return repo.syncRoster([
+      for (final m in mess.members) (email: m.email, name: m.name),
+    ]);
+  }
 
   Future<void> add(String name) async {
     await ref.read(repositoryProvider).addMember(name);

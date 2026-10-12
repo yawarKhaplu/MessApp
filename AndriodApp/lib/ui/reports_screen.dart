@@ -4,6 +4,8 @@ import 'package:intl/intl.dart';
 
 import '../data/models.dart';
 import '../providers.dart';
+import '../services/expense_cloud_service.dart';
+import '../services/mess_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'edit_expense_screen.dart';
@@ -392,29 +394,52 @@ class _DailyTab extends ConsumerWidget {
                 child: AppCard(
                   padding: const EdgeInsets.all(12),
                   onTap: () async {
-                    // Open the editor for this entry. member_id has to come
-                    // through too, or the editor shows "unassigned" even
-                    // though somebody cooked.
-                    final expense = Expense(
-                      id: e['id'] as int?,
-                      date: DateTime.parse(e['date'] as String),
-                      menuId: e['menu_id'] as int?,
-                      memberId: e['member_id'] as int?,
-                      total: (e['total'] as num?)?.toDouble() ?? 0,
-                    );
+                    // Open the editor for the shared entry this row refers to.
+                    // The report itself still reads local rows, so the entry is
+                    // looked up in Firestore by date; an entry not found there is
+                    // one saved before the move, and is left alone rather than
+                    // opened for editing against the wrong record.
+                    final date = '${e['date']}';
+                    final shared = await ref.read(messCloudServiceProvider)
+                        .expenses(
+                          ref.read(activeMessProvider).valueOrNull?.id ?? '',
+                          monthOf(date),
+                        );
+
+                    CloudExpense? found;
+                    for (final candidate in shared) {
+                      if (candidate.date == date &&
+                          candidate.menuName ==
+                              (e['menu_name'] as String? ?? 'Menu entry') &&
+                          candidate.total ==
+                              (e['total'] as num?)?.toDouble()) {
+                        found = candidate;
+                        break;
+                      }
+                    }
+
                     Navigator.pop(ctx);
+                    if (found == null) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                                'This entry was saved on this device only and '
+                                'is not in the mess yet.'),
+                          ),
+                        );
+                      }
+                      return;
+                    }
+
                     await Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) => EditExpenseScreen(
-                          expense: expense,
-                          menuName: e['menu_name'] as String? ?? 'Menu entry',
-                          date: DateTime.parse(e['date'] as String),
-                        ),
+                        builder: (_) => EditExpenseScreen(entry: found!),
                       ),
                     );
                     if (context.mounted) {
-                      // Refresh every total and report, not just this tab.
                       await refreshTotals(ref);
+                      ref.invalidate(sharedExpensesProvider(monthOf(date)));
                     }
                   },
                   child: Row(

@@ -4,24 +4,22 @@ import 'package:intl/intl.dart';
 
 import '../data/models.dart';
 import '../providers.dart';
+import '../services/expense_cloud_service.dart';
+import '../services/mess_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'widgets/member_picker_sheet.dart';
 import 'widgets/pick_date.dart';
 import 'widgets/text_input_dialog.dart';
 
-/// Edit an existing expense entry (view items, fix prices, add/remove items).
+/// Edit an existing shared expense entry.
+///
+/// Owner only. Everyone can see the entry, but a correction changes what the mess
+/// owes, so the rules refuse a member's edit.
 class EditExpenseScreen extends ConsumerStatefulWidget {
-  final Expense expense;
-  final String menuName;
-  final DateTime date;
+  final CloudExpense entry;
 
-  const EditExpenseScreen({
-    super.key,
-    required this.expense,
-    required this.menuName,
-    required this.date,
-  });
+  const EditExpenseScreen({super.key, required this.entry});
 
   @override
   ConsumerState<EditExpenseScreen> createState() =>
@@ -29,11 +27,15 @@ class EditExpenseScreen extends ConsumerStatefulWidget {
 }
 
 class _EditExpenseScreenState extends ConsumerState<EditExpenseScreen> {
-  late DateTime _date = widget.date;
-  Member? _member;
-  List<ExpenseItem> _items = [];
-  final Map<int, TextEditingController> _priceControllers = {};
-  final Map<int, TextEditingController> _qtyControllers = {};
+  late DateTime _date =
+      DateTime.tryParse(widget.entry.date) ?? DateTime.now();
+
+  /// Who cooked, from the shared entry rather than a local member row.
+  String? _cookEmail;
+
+  List<CloudExpenseItem> _items = [];
+  final Map<String, TextEditingController> _priceControllers = {};
+  final Map<String, TextEditingController> _qtyControllers = {};
 
   /// Bumped whenever any price/qty field changes, so the total card and the
   /// per-item line totals rebuild live while typing.
@@ -51,33 +53,36 @@ class _EditExpenseScreenState extends ConsumerState<EditExpenseScreen> {
     if (mounted) _tick.value++;
   }
 
-  void _bind(ExpenseItem item) {
+  void _bind(CloudExpenseItem item) {
     _priceControllers[item.id]?.addListener(_notifyTotal);
     _qtyControllers[item.id]?.addListener(_notifyTotal);
   }
 
-  void _unbind(ExpenseItem item) {
+  void _unbind(CloudExpenseItem item) {
     _priceControllers[item.id]?.removeListener(_notifyTotal);
     _qtyControllers[item.id]?.removeListener(_notifyTotal);
   }
 
   Future<void> _load() async {
-    final items = await ref
-        .read(repositoryProvider)
-        .getExpenseItems(widget.expense.id!);
-    // Resolve the currently assigned member. Falls back to reading it from the
-    // entry itself, so the editor always shows the real cook.
-    Member? member = await ref
-        .read(repositoryProvider)
-        .getExpenseMember(widget.expense.id!);
     if (!mounted) return;
     setState(() {
-      _member = member;
-      _items = items;
-      for (final item in items) {
-        _priceControllers[item.id!] =
+      // The shared entry carries its own items and cook, so there is nothing
+      // to fetch separately.
+      _cookEmail =
+          widget.entry.cookEmail.isEmpty ? null : widget.entry.cookEmail;
+      _items = [
+        for (final i in widget.entry.items)
+          CloudExpenseItem(
+            id: i.id,
+            name: i.name,
+            quantity: i.quantity,
+            price: i.price,
+          ),
+      ];
+      for (final item in _items) {
+        _priceControllers[item.id] =
             TextEditingController(text: _fmt(item.price));
-        _qtyControllers[item.id!] =
+        _qtyControllers[item.id] =
             TextEditingController(text: _fmtQty(item.quantity));
         _bind(item);
       }
@@ -85,41 +90,61 @@ class _EditExpenseScreenState extends ConsumerState<EditExpenseScreen> {
     });
   }
 
-  /// Change who cooked / paid for this entry.
+  /// Change who cooked for this entry, from the shared roster.
   Future<void> _pickMember() async {
-    final repo = ref.read(repositoryProvider);
-    final rotation = await repo.getCookRotation();
-    final members = rotation.hasMembers
-        ? rotation.members
-        : await ref.read(membersProvider.future);
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    final people = mess?.members ?? const [];
     if (!mounted) return;
-    if (members.isEmpty) {
+    if (people.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Add members first in the Collection tab')),
+        const SnackBar(content: Text('Nobody is in the mess yet')),
       );
       return;
     }
 
+    final turn = mess?.turn;
+    final turnIndex = (turn == null || turn.today == null)
+        ? null
+        : turn.order.indexWhere((m) =>
+            m.email.trim().toLowerCase() ==
+            turn.today!.email.trim().toLowerCase());
+
     final result = await showMemberPickerSheet(
       context,
-      members: members,
-      current: _member,
-      turnIndex:
-          rotation.hasMembers ? rotation.positionInRound - 1 : null,
+      members: [
+        for (final m in people)
+          Member(id: null, name: m.name ?? m.email, email: m.email),
+      ],
+      currentEmail: _cookEmail,
+      turnIndex: turnIndex,
       subtitle: 'Change who cooked for this entry',
     );
-    // null means the sheet was dismissed — keep whatever was set.
+    // null means the sheet was dismissed - keep whatever was set.
     if (result == null || !mounted) return;
     setState(() {
-      _member =
-          identical(result, kUnassignedMember) ? null : result as Member;
+      _cookEmail = identical(result, kUnassignedMember)
+          ? null
+          : (result as Member).email?.trim().toLowerCase();
     });
   }
 
-  /// Clear the assignment without opening the picker.
+  /// Display name for whoever cooked, taken from the shared roster.
+///
+/// Falls back to the address's local part so the row is never blank.
+String? _cookName(BuildContext context) {
+  final email = _cookEmail;
+  if (email == null || email.isEmpty) return null;
+
+  final roster = ref.read(activeMessProvider).valueOrNull?.members ?? const [];
+  for (final m in roster) {
+    if (m.email.trim().toLowerCase() == email) return m.name ?? m.email;
+  }
+  return email.split('@').first;
+}
+
+/// Clear the assignment without opening the picker.
   void _clearMember() {
-    setState(() => _member = null);
+    setState(() => _cookEmail = null);
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Bari set to unassigned')),
     );
@@ -178,22 +203,21 @@ class _EditExpenseScreenState extends ConsumerState<EditExpenseScreen> {
       ),
     );
     if (name == null || name.trim().isEmpty) return;
-    final newItem = ExpenseItem(
-      id: -DateTime.now().millisecondsSinceEpoch,
-      expenseId: widget.expense.id!,
-      itemName: name.trim(),
+    final newItem = CloudExpenseItem(
+      id: newExpenseItemId(),
+      name: name.trim(),
       quantity: 1,
       price: 0,
     );
     setState(() {
       _items.add(newItem);
-      _priceControllers[newItem.id!] = TextEditingController();
-      _qtyControllers[newItem.id!] = TextEditingController(text: '1');
+      _priceControllers[newItem.id] = TextEditingController();
+      _qtyControllers[newItem.id] = TextEditingController(text: '1');
       _bind(newItem);
     });
   }
 
-  void _removeItem(ExpenseItem item) {
+  void _removeItem(CloudExpenseItem item) {
     setState(() {
       _items.removeWhere((i) => i.id == item.id);
       _unbind(item);
@@ -204,14 +228,14 @@ class _EditExpenseScreenState extends ConsumerState<EditExpenseScreen> {
   }
 
   Future<void> _save() async {
-    final entries = <ExpenseItem>[];
+    final entries = <CloudExpenseItem>[];
     for (final item in _items) {
       final pc = _priceControllers[item.id];
       final qc = _qtyControllers[item.id];
       if (pc == null || qc == null) continue;
-      entries.add(ExpenseItem(
-        expenseId: widget.expense.id!,
-        itemName: item.itemName,
+      entries.add(CloudExpenseItem(
+        id: item.id,
+        name: item.name,
         quantity: _parse(qc),
         price: _parse(pc),
       ));
@@ -222,17 +246,26 @@ class _EditExpenseScreenState extends ConsumerState<EditExpenseScreen> {
       return;
     }
 
-    final repo = ref.read(repositoryProvider);
-    await repo.updateExpense(
-      id: widget.expense.id!,
-      items: entries,
-      memberId: _member?.id,
-    );
-    // Also allow moving the entry to a different date.
-    if (!DateUtils.isSameDay(_date, widget.date)) {
-      await repo.updateExpenseDate(widget.expense.id!, _date);
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+
+    try {
+      await ref.read(messCloudServiceProvider).updateExpense(
+        messId: mess.id,
+        expenseId: widget.entry.id,
+        date: monthKey(_date),
+        menuName: widget.entry.menuName,
+        cookEmail: _cookEmail ?? widget.entry.cookEmail,
+        items: entries,
+      );
+      ref.invalidate(sharedExpensesProvider(monthOf(widget.entry.date)));
+      ref.invalidate(sharedExpensesProvider(monthOf(monthKey(_date))));
+    } on CloudMessage catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.text)));
+      return;
     }
-    await refreshTotals(ref);
 
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -257,8 +290,19 @@ class _EditExpenseScreenState extends ConsumerState<EditExpenseScreen> {
       ),
     );
     if (ok != true) return;
-    await ref.read(repositoryProvider).deleteExpense(widget.expense.id!);
-    await refreshTotals(ref);
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+    try {
+      await ref
+          .read(messCloudServiceProvider)
+          .deleteExpense(messId: mess.id, expenseId: widget.entry.id);
+      ref.invalidate(sharedExpensesProvider(monthOf(widget.entry.date)));
+    } on CloudMessage catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.text)));
+      return;
+    }
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(const SnackBar(content: Text('Entry deleted')));
@@ -308,7 +352,7 @@ class _EditExpenseScreenState extends ConsumerState<EditExpenseScreen> {
                           child: const Icon(Icons.restaurant_menu,
                               color: AppTheme.primary, size: 22),
                         ),
-                        title: Text(widget.menuName,
+                        title: Text(widget.entry.menuName,
                             style: Theme.of(context).textTheme.titleMedium),
                         subtitle: const Text('Menu'),
                       ),
@@ -325,15 +369,16 @@ class _EditExpenseScreenState extends ConsumerState<EditExpenseScreen> {
                           child: const Icon(Icons.person_outline,
                               color: AppTheme.accent, size: 22),
                         ),
-                        title: Text(_member?.name ?? 'Who is cooking / paying?',
+                        title: Text(
+                            _cookName(context) ?? 'Who cooked this meal?',
                             style: Theme.of(context).textTheme.titleMedium),
-                        subtitle: Text(_member == null
-                            ? 'Optional · tap to assign'
+                        subtitle: Text(_cookEmail == null
+                            ? 'Tap to assign'
                             : 'Tap to change'),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            if (_member != null)
+                            if (_cookEmail != null)
                               IconButton(
                                 icon: const Icon(Icons.person_off_outlined,
                                     size: 20, color: AppTheme.textSecondary),
@@ -454,7 +499,7 @@ class _EditExpenseScreenState extends ConsumerState<EditExpenseScreen> {
 
 /// One editable item row: name, live line total, qty, price, remove.
 class _ItemEditorRow extends StatelessWidget {
-  final ExpenseItem item;
+  final CloudExpenseItem item;
   final TextEditingController priceCtrl;
   final TextEditingController qtyCtrl;
   final ValueNotifier<int> tick;
@@ -489,7 +534,7 @@ class _ItemEditorRow extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Text(
-                    item.itemName,
+                    item.name,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(fontWeight: FontWeight.w600),

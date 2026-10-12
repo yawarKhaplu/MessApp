@@ -89,12 +89,66 @@ service cloud.firestore {
         && !hasMembership()
         && request.resource.data.ownerUid == request.auth.uid;
 
-      // Owners have full management control. The members roster lives on this
-      // document, so reading the mess also reveals who is in it.
-      allow read, update, delete: if isOwnerOfMess(messId);
+      // Owners have full management control.
+      allow update, delete: if isOwnerOfMess(messId);
 
-      // Members get restricted visibility: they may read the mess and its roster,
-      // but change nothing. Only the owner can add or remove people.
+      // Anyone in the mess may read the mess document, which carries the roster.
+      // Split from update/delete above so members are not locked out of their
+      // own mess, which is what a combined "read, update, delete" would do.
+      allow read: if isOwnerOfMess(messId) || isMemberOfMess(messId);
+
+      // Shared expenses: what the mess cooked and what it cost.
+      //
+      // Read access is granted from a field ON the document rather than from the
+      // parent mess. That is deliberate: a rule that reads another document cannot
+      // be proven against a query, so filtering on ownerUid would be denied for
+      // members. Each expense carries the uids allowed to read it, which makes
+      // "expenses visible to me" provable and works the same for everyone.
+      match /expenses/{expenseId} {
+        allow read: if request.auth != null
+          && request.auth.uid in resource.data.visibleTo;
+
+        // The owner may record anything, on anyone's behalf.
+        //
+        // A member may record a meal, but only one attributed to themselves and
+        // only dated roughly today, which stops one member logging meals under
+        // another's name. What this cannot do is check the cooking turn: that
+        // arithmetic is not expressible as a provable rule, so the app only offers
+        // the screen on the person's own turn.
+        allow create: if isOwnerOfMess(messId)
+          || (isMemberOfMess(messId)
+              && request.resource.data.cookEmail
+                   == request.auth.token.email.lower()
+              && request.resource.data.dateTime <= request.time
+              && request.resource.data.dateTime
+                   >= request.time - duration.value(1, 'd'));
+
+        // Editing is the owner's alone: a correction changes what the mess owes,
+        // which the member being corrected has no business doing.
+        allow update: if isOwnerOfMess(messId);
+
+        allow delete: if isOwnerOfMess(messId);
+      }
+
+      // Monthly collections and the payments against them.
+      //
+      // One document per member per month, keyed "<email>__<yyyy-MM>". Members
+      // can read it and only the owner can write it, which matches how a
+      // collection actually works: everyone is shown the figure, only the owner
+      // records it.
+      //
+      // The payment list lives inside the document rather than in a second
+      // subcollection, so one read returns the share and the whole payment
+      // history. Listing them separately would need a query, and a query cannot
+      // be proven against a rule that reads the parent mess — the same failure
+      // that stopped members seeing the roster.
+      match /collections/{collectionId} {
+        allow read: if isMemberOfMess(messId);
+        allow write: if isOwnerOfMess(messId);
+      }
+
+      // Members get restricted visibility: they may read what is inside the
+      // mess but change nothing. Only the owner can add or remove people.
       match /{document=**} {
         allow read: if isMemberOfMess(messId);
         allow write: if false;
