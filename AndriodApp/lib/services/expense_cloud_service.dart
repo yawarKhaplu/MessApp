@@ -124,6 +124,37 @@ String newExpenseItemId() => 'i${DateTime.now().microsecondsSinceEpoch}'
 /// The month a day belongs to, as `yyyy-MM`.
 String monthOf(String day) => day.length >= 7 ? day.substring(0, 7) : day;
 
+/// Builds the list of addresses allowed to read an entry.
+///
+/// Addresses, not uids. A Firebase uid cannot be known until the person first
+/// signs in, so a member sits in the roster with a null uid until they do;
+/// keying on uids meant the writer's own uid was usually absent and the entry
+/// was invisible to the person who had just written it.
+///
+/// The writer is always included, so nobody can save something they then cannot
+/// read back. Empty addresses are dropped: an empty string in the array matches
+/// nobody, and carrying one only makes the field harder to reason about.
+///
+/// Visibility is fixed when the entry is written. Somebody who joins later sees
+/// meals recorded from then on, not the history from before — which is the
+/// honest reading of who was in the mess at the time.
+List<String> visibleToFor({
+  required Iterable<String> rosterEmails,
+  String? recorderEmail,
+}) {
+  final out = <String>{};
+
+  final mine = (recorderEmail ?? '').trim().toLowerCase();
+  if (mine.isNotEmpty) out.add(mine);
+
+  for (final e in rosterEmails) {
+    final clean = e.trim().toLowerCase();
+    if (clean.isNotEmpty) out.add(clean);
+  }
+
+  return out.toList();
+}
+
 /// Totals for a day, used by Home and the reports.
 class ExpenseTotals {
   final double total;

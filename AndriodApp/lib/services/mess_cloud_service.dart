@@ -761,22 +761,25 @@ class MessCloudService {
 
   // ---- Expenses ----
 
-  /// Expenses the caller may read, newest day first.
+  /// Every expense the caller may read, newest day first.
   ///
-  /// Filtered on `visibleTo`, which every expense is written with. That is the
-  /// only shape of query these rules can prove, and it returns the same entries
-  /// for the owner and for a member.
-  Future<List<CloudExpense>> expenses(
-    String messId,
-    String month,
-  ) async {
-    final uid = _user?.uid;
-    if (uid == null) return const [];
+  /// One filter, on purpose: `visibleTo` alone. Adding an equality clause on
+  /// `month` makes this a two-field query, and Firestore does not create
+  /// composite indexes automatically — the query fails outright with
+  /// FAILED_PRECONDITION and the list comes back empty with an error behind it.
+  /// A single-field array-contains filter is served by the automatic index, and
+  /// the month is applied in Dart instead, which cannot fail that way.
+  ///
+  /// The filter is also the only shape these rules can prove: the rule reads
+  /// `visibleTo` off the document, so a query constrained to exactly that field
+  /// is checkable, while anything reading another document would be denied.
+  Future<List<CloudExpense>> _visibleExpenses(String messId) async {
+    final email = _myEmail;
+    if (email == null) return const [];
 
     final snap = await _db
         .collection('$_messes/$messId/expenses')
-        .where('visibleTo', arrayContains: uid)
-        .where('month', isEqualTo: month)
+        .where('visibleTo', arrayContains: email)
         .get();
 
     final list = snap.docs
@@ -793,26 +796,30 @@ class MessCloudService {
     return list;
   }
 
-  /// Every expense the caller may read, across all months.
+  /// Expenses the caller may read inside one month.
   ///
-  /// Reports need a date range that can cross months, and reading each month in
-  /// turn is simpler than one query with a range it may not be able to prove.
+  /// [month] is `yyyy-MM`. The day field is `yyyy-MM-dd`, so matching on the
+  /// leading seven characters is what puts an entry in its month.
+  Future<List<CloudExpense>> expenses(
+    String messId,
+    String month,
+  ) async {
+    final all = await _visibleExpenses(messId);
+    return all.where((e) => monthOf(e.date) == month).toList();
+  }
+
+  /// Every expense the caller may read across the given months.
+  ///
+  /// Reads once and picks out the months wanted, rather than asking per month.
+  /// The query is the same either way, so a loop would only pay the round trip
+  /// again for a result already in hand.
   Future<List<CloudExpense>> allExpenses(
     String messId,
     List<String> months,
   ) async {
-    final all = <CloudExpense>[];
-    for (final month in months) {
-      all.addAll(await expenses(messId, month));
-    }
-
-    all.sort((a, b) {
-      final byDate = b.date.compareTo(a.date);
-      if (byDate != 0) return byDate;
-      return (b.createdAt ?? DateTime(0)).compareTo(a.createdAt ?? DateTime(0));
-    });
-
-    return all;
+    final wanted = months.toSet();
+    final all = await _visibleExpenses(messId);
+    return all.where((e) => wanted.contains(monthOf(e.date))).toList();
   }
 
   /// Saves one day's entry.
@@ -850,7 +857,10 @@ class MessCloudService {
         'cookEmail': cookEmail.trim().toLowerCase(),
         'recordedBy': _myEmail,
         'createdAt': FieldValue.serverTimestamp(),
-        'visibleTo': [for (final m in roster) m.uid],
+        'visibleTo': visibleToFor(
+          rosterEmails: [for (final m in roster) m.email],
+          recorderEmail: _myEmail,
+        ),
         'items': {for (final i in items) i.id: i.toDoc()},
       });
       return ref.id;

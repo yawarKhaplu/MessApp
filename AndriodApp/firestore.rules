@@ -102,11 +102,16 @@ service cloud.firestore {
       // Read access is granted from a field ON the document rather than from the
       // parent mess. That is deliberate: a rule that reads another document cannot
       // be proven against a query, so filtering on ownerUid would be denied for
-      // members. Each expense carries the uids allowed to read it, which makes
-      // "expenses visible to me" provable and works the same for everyone.
+      // members. Each expense carries the addresses allowed to read it, which
+      // makes "expenses visible to me" provable and works the same for everyone.
+      //
+      // Addresses rather than uids: a Firebase uid cannot be known until somebody
+      // first signs in, and a member sits in the roster with a null uid until they
+      // do. Keying on addresses means visibility works from the moment the owner
+      // adds somebody, with no second sign-in needed before history appears.
       match /expenses/{expenseId} {
         allow read: if request.auth != null
-          && request.auth.uid in resource.data.visibleTo;
+          && request.auth.token.email.lower() in resource.data.visibleTo;
 
         // The owner may record anything, on anyone's behalf.
         //
