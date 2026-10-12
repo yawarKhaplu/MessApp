@@ -7,6 +7,7 @@ import 'services/collection_cloud_service.dart';
 import 'services/expense_cloud_service.dart';
 import 'services/mess_cloud_service.dart';
 import 'services/other_expense_cloud_service.dart';
+import 'services/report_cloud_service.dart';
 import 'services/menu_cloud_service.dart';
 import 'services/notifications.dart';
 
@@ -336,8 +337,27 @@ Future<String> saveExpense({
   // than leaving a stale copy behind on whichever one the app was showing.
   ref.invalidate(sharedExpensesProvider(monthOf(date)));
   ref.invalidate(sharedExpensesProvider(monthKey(DateTime.now())));
+
+  // Reports are read across several tabs at once. Invalidated as a whole rather
+  // than per tab, so a figure on one tab cannot contradict the tab beside it.
+  ref.invalidate(reportBundleProvider);
   return id;
 }
+
+// ---------- Reports ----------
+
+/// Everything the reports read, fetched once and shared by every tab.
+///
+/// One bundle rather than a question per figure: Firestore cannot be asked for an
+/// aggregate under these rules, so the grouping happens in Dart. Every tab works
+/// from the same bundle, which is what stops the daily list, the trend and the
+/// month forecast disagreeing about the same day.
+final reportBundleProvider = FutureProvider.autoDispose<ReportBundle>((ref) async {
+  final mess = await ref.watch(activeMessProvider.future);
+  if (mess == null) return const ReportBundle.empty();
+
+  return ref.read(messCloudServiceProvider).reportBundle(mess.id);
+});
 
 // ---------- Other expenses (shared) ----------
 
@@ -423,6 +443,7 @@ Future<void> saveOtherExpense({
 
   ref.invalidate(otherExpensesProvider(monthOf(date)));
   ref.invalidate(categoryBudgetsProvider(DateTime.parse(date)));
+  ref.invalidate(reportBundleProvider);
   ref.invalidate(activeMessProvider);
 }
 
@@ -444,6 +465,7 @@ Future<void> deleteOtherExpense({
       .deleteOtherExpense(messId: mess.id, month: month, id: id);
 
   ref.invalidate(otherExpensesProvider(month));
+  ref.invalidate(reportBundleProvider);
   ref.invalidate(activeMessProvider);
 }
 
@@ -523,6 +545,10 @@ Future<void> refreshTotals(WidgetRef ref) async {
   ref.invalidate(itemWiseProvider);
   ref.invalidate(monthCollectionsProvider);
   ref.invalidate(rotationProvider);
+
+  // Payments and shares change what the reports say about money in, so the
+  // bundle is refreshed here too rather than only from the expense screens.
+  ref.invalidate(reportBundleProvider);
 }
 
 // ---------- Collection (monthly) ----------

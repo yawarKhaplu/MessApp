@@ -8,6 +8,7 @@ import 'collection_cloud_service.dart';
 import 'expense_cloud_service.dart';
 import 'menu_cloud_service.dart';
 import 'other_expense_cloud_service.dart';
+import 'report_cloud_service.dart';
 
 /// Roles a person can hold in a mess.
 enum MessRole {
@@ -916,6 +917,78 @@ class MessCloudService {
     } on FirebaseException catch (e) {
       throw CloudMessage(_friendly(e));
     }
+  }
+
+  // ---- Reports ----
+
+  /// Everything the reports need, read once.
+  ///
+  /// One bundle rather than a question per figure, because Firestore cannot be
+  /// asked for an aggregate at all under these rules: a query cannot be proven
+  /// against a rule that reads another document, and every rule here does. So
+  /// the grouping and totalling happen in Dart, in one place, which also means
+  /// the daily list, the trend and the month forecast cannot disagree with each
+  /// other about the same day.
+  ///
+  /// Months are read one document at a time by id. That is a direct read rather
+  /// than a query, so the membership check applies to it.
+  Future<ReportBundle> reportBundle(String messId) async {
+    final mess = await myMess();
+    final roster = mess?.members ?? const <MessMember>[];
+
+    // Months are collected from whatever the mess already knows about, so a
+    // report covering a year does not have to guess how far back to look.
+    final months = <String>{};
+    months.add(monthKeyOf(DateTime.now()));
+    for (final m in await otherExpenseMonths(messId)) {
+      months.add(m);
+    }
+
+    final other = <CloudOtherExpense>[];
+    for (final m in months) {
+      try {
+        other.addAll(await otherExpenses(messId, m));
+      } on CloudMessage {
+        // One unreadable month must not blank the whole report; the rest of the
+        // mess's history is still worth showing.
+        continue;
+      }
+    }
+
+    // Every month the mess could plausibly hold collections for, so a report of
+    // the selected month can be answered without asking which months exist.
+    final now = DateTime.now();
+    final collectionMonths = <String>{
+      monthKeyOf(now),
+      monthKeyOf(DateTime(now.year, now.month - 1, 1)),
+      monthKeyOf(DateTime(now.year, now.month - 2, 1)),
+    };
+
+    final collections = <MemberCollection>[];
+    for (final m in collectionMonths) {
+      // Read per member by document id. A query for "every member's collection
+      // for this month" cannot be proven against these rules, and the roster is
+      // already in hand, so the ids are known without asking.
+      for (final member in roster) {
+        try {
+          final c = await collectionFor(messId, member.email, m);
+          // A member with no document yet simply has no share recorded, which is
+          // different from a share of zero and must not be shown as paid.
+          if (c.amountDue > 0 || c.payments.isNotEmpty) collections.add(c);
+        } on CloudMessage {
+          continue;
+        }
+      }
+    }
+
+    return ReportBundle(
+      messId: messId,
+      roster: roster,
+      meals: await allExpenses(messId, months.toList()),
+      other: other,
+      collections: collections,
+      categories: await otherCategories(messId),
+    );
   }
 
   // ---- Other expenses ----
