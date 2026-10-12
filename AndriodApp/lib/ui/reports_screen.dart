@@ -7,6 +7,7 @@ import '../providers.dart';
 import '../services/expense_cloud_service.dart';
 import '../services/mess_cloud_service.dart';
 import '../services/other_expense_cloud_service.dart';
+import '../services/report_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'edit_expense_screen.dart';
@@ -278,13 +279,21 @@ class _WalletTab extends ConsumerWidget {
 
   Future<Map<String, double>> _walletTotals(
       WidgetRef ref, DateTime from, DateTime to) async {
-    final repo = ref.read(repositoryProvider);
-    final collected = await repo.getTotalCollected(from: from, to: to);
-    final expenses = await repo.getExpenses(from: from, to: to);
-    final other = await repo.getOtherExpenses(from: from, to: to);
-    final spent = expenses.fold<double>(0, (s, e) => s + e.total) +
-        other.fold<double>(0, (s, e) => s + e.amount);
-    return {'collected': collected, 'spent': spent};
+    final bundle =
+        await ref.read(messCloudServiceProvider).reportBundle(ref
+            .read(activeMessProvider)
+            .valueOrNull
+            ?.id ??
+            '');
+
+    final t = bundle.collectedBetween(dayKey(from), dayKey(to));
+
+    return {
+      'collected': t.collected,
+      // Spent from the same bundle, so the two figures on this screen cannot
+      // come from different reads of different months.
+      'spent': bundle.spentBetween(dayKey(from), dayKey(to)),
+    };
   }
 }
 
@@ -297,83 +306,91 @@ class _DailyTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<List<Map<String, Object?>>>(
-      future: ref.read(repositoryProvider).getDailyTotals(range.from, range.to),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final days = snap.data!;
-        if (days.isEmpty) {
-          return const Center(child: Text('No expenses in this range.'));
-        }
-        return ListView.builder(
-          padding: const EdgeInsets.all(16),
-          itemCount: days.length,
-          itemBuilder: (context, i) {
-            final d = days[i];
-            final date = DateTime.parse(d['date'] as String);
-            final total = (d['total'] as num?)?.toDouble() ?? 0;
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: AppCard(
-                onTap: () => _showDayDetail(context, ref, date, money),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: AppTheme.primary.withOpacity(0.1),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text('${date.day}',
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 18,
-                                  color: AppTheme.primary)),
-                          Text(DateFormat('MMM').format(date),
-                              style: const TextStyle(
-                                  fontSize: 10, color: AppTheme.textSecondary)),
-                        ],
-                      ),
+    return ref.watch(reportBundleProvider).when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(child: Text('Could not load: $e')),
+          data: (bundle) {
+            final days =
+                bundle.dailyTotals(dayKey(range.from), dayKey(range.to));
+            if (days.isEmpty) {
+              return const Center(child: Text('No expenses in this range.'));
+            }
+
+            return ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: days.length,
+              itemBuilder: (context, i) {
+                final row = days[i];
+                final date = DateTime.parse(row.day);
+                final total = row.total;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: AppCard(
+                    onTap: () => _showDayDetail(context, ref, bundle, date, money),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: AppTheme.primary.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text('${date.day}',
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 18,
+                                      color: AppTheme.primary)),
+                              Text(DateFormat('MMM').format(date),
+                                  style: const TextStyle(
+                                      fontSize: 10,
+                                      color: AppTheme.textSecondary)),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(DateFormat.EEEE().format(date),
+                                  style:
+                                      Theme.of(context).textTheme.titleSmall),
+                              const SizedBox(height: 2),
+                              Text(DateFormat.yMMMd().format(date),
+                                  style:
+                                      Theme.of(context).textTheme.bodySmall),
+                            ],
+                          ),
+                        ),
+                        Text(money.format(total),
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 16,
+                                color: AppTheme.primary)),
+                      ],
                     ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(DateFormat.EEEE().format(date),
-                              style: Theme.of(context).textTheme.titleSmall),
-                          const SizedBox(height: 2),
-                          Text(DateFormat.yMMMd().format(date),
-                              style: Theme.of(context).textTheme.bodySmall),
-                        ],
-                      ),
-                    ),
-                    Text(money.format(total),
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w700,
-                            fontSize: 16,
-                            color: AppTheme.primary)),
-                  ],
-                ),
-              ),
+                  ),
+                );
+              },
             );
           },
         );
-      },
-    );
   }
 
-  Future<void> _showDayDetail(BuildContext context, WidgetRef ref,
-      DateTime day, NumberFormat money) async {
-    final repo = ref.read(repositoryProvider);
-    final expenses = await repo.getDayExpenses(day);
-    final other = await repo.getOtherExpenses(from: day, to: day);
+  Future<void> _showDayDetail(
+      BuildContext context,
+      WidgetRef ref,
+      ReportBundle bundle,
+      DateTime day,
+      NumberFormat money) async {
+    final key = dayKey(day);
+    final entries = bundle.dayEntries(key);
+    final expenses = entries.meals;
+    final other = entries.other;
 
     if (!context.mounted) return;
     await showModalBottomSheet(
@@ -395,52 +412,26 @@ class _DailyTab extends ConsumerWidget {
                 child: AppCard(
                   padding: const EdgeInsets.all(12),
                   onTap: () async {
-                    // Open the editor for the shared entry this row refers to.
-                    // The report itself still reads local rows, so the entry is
-                    // looked up in Firestore by date; an entry not found there is
-                    // one saved before the move, and is left alone rather than
-                    // opened for editing against the wrong record.
-                    final date = '${e['date']}';
-                    final shared = await ref.read(messCloudServiceProvider)
-                        .expenses(
-                          ref.read(activeMessProvider).valueOrNull?.id ?? '',
-                          monthOf(date),
-                        );
-
-                    CloudExpense? found;
-                    for (final candidate in shared) {
-                      if (candidate.date == date &&
-                          candidate.menuName ==
-                              (e['menu_name'] as String? ?? 'Menu entry') &&
-                          candidate.total ==
-                              (e['total'] as num?)?.toDouble()) {
-                        found = candidate;
-                        break;
-                      }
-                    }
-
+                    // Already the shared entry, so it goes straight to the
+                    // editor. The lookup this used to do existed only because the
+                    // report was reading local rows while the editor took a
+                    // Firestore one.
+                    final entry = e;
                     Navigator.pop(ctx);
-                    if (found == null) {
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                                'This entry was saved on this device only and '
-                                'is not in the mess yet.'),
-                          ),
-                        );
-                      }
-                      return;
-                    }
 
                     await Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) => EditExpenseScreen(entry: found!),
+                        builder: (_) => EditExpenseScreen(entry: entry),
                       ),
                     );
                     if (context.mounted) {
                       await refreshTotals(ref);
-                      ref.invalidate(sharedExpensesProvider(monthOf(date)));
+                      // The entry may have been moved to another month by the
+                      // edit, so both the month it came from and the one it is in
+                      // are cleared rather than leaving a stale copy behind.
+                      ref.invalidate(sharedExpensesProvider(monthOf(entry.date)));
+                      ref.invalidate(
+                          sharedExpensesProvider(monthOf(monthKey(day))));
                     }
                   },
                   child: Row(
@@ -449,10 +440,10 @@ class _DailyTab extends ConsumerWidget {
                           color: AppTheme.primary, size: 20),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: Text(e['menu_name'] as String? ?? 'Menu entry',
+                        child: Text(e.menuName,
                             style: Theme.of(context).textTheme.titleSmall),
                       ),
-                      Text(money.format((e['total'] as num?)?.toDouble() ?? 0),
+                      Text(money.format(e.total),
                           style: const TextStyle(fontWeight: FontWeight.w700)),
                       const SizedBox(width: 6),
                       const Icon(Icons.chevron_right,
@@ -467,46 +458,13 @@ class _DailyTab extends ConsumerWidget {
                 child: AppCard(
                   padding: const EdgeInsets.all(12),
                   onTap: () async {
-                    // The report still reads local rows while other expenses
-                    // have moved to Firestore, so the shared entry this row
-                    // refers to is looked up by date, category and amount. A row
-                    // with no match is one saved before the move, and is left
-                    // alone rather than opened for editing against a different
-                    // record. This disappears once reports read Firestore too.
-                    final messId =
-                        ref.read(activeMessProvider).valueOrNull?.id ?? '';
-                    final day = dayKey(o.date);
-                    final shared = await ref
-                        .read(messCloudServiceProvider)
-                        .otherExpenses(messId, monthOf(day));
-
-                    CloudOtherExpense? found;
-                    for (final c in shared) {
-                      if (c.date == day &&
-                          c.category == o.category &&
-                          c.amount == o.amount) {
-                        found = c;
-                        break;
-                      }
-                    }
-
+                    // Already the shared record, so no lookup is needed.
+                    final record = o;
                     Navigator.pop(ctx);
-                    if (found == null) {
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                                'This record was saved on this device only and '
-                                'is not in the mess yet.'),
-                          ),
-                        );
-                      }
-                      return;
-                    }
 
                     await Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) => OtherExpenseScreen(editing: found),
+                        builder: (_) => OtherExpenseScreen(editing: record),
                       ),
                     );
                     if (context.mounted) {
@@ -546,91 +504,89 @@ class _ByMemberTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<List<Map<String, Object?>>>(
-      future: ref
-          .read(repositoryProvider)
-          .getMemberWiseTotals(range.from, range.to),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final rows = snap.data!;
-        if (rows.isEmpty) {
-          return const Center(
-              child: Text('No member-tagged entries in this range.'));
-        }
-        final grand = rows.fold<double>(
-            0, (s, r) => s + ((r['total'] as num?)?.toDouble() ?? 0));
+    return ref.watch(reportBundleProvider).when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(child: Text('Could not load: $e')),
+          data: (bundle) {
+            final rows =
+                bundle.byCook(dayKey(range.from), dayKey(range.to));
+            if (rows.isEmpty) {
+              return const Center(
+                  child: Text('No member-tagged entries in this range.'));
+            }
 
-        return ListView.separated(
-          padding: const EdgeInsets.all(16),
-          itemCount: rows.length,
-          separatorBuilder: (_, _) => const SizedBox(height: 10),
-          itemBuilder: (context, i) {
-            final r = rows[i];
-            final total = (r['total'] as num?)?.toDouble() ?? 0;
-            final entries = (r['entries'] as num?)?.toInt() ?? 0;
-            final share = grand > 0 ? total / grand : 0.0;
-            final name = r['name'] as String? ?? 'Unassigned';
-            final unassigned = name == 'Unassigned';
+            final grand = rows.fold<double>(0, (s, r) => s + r.total);
 
-            return AppCard(
-              child: Row(
-                children: [
-                  Container(
-                    width: 46,
-                    height: 46,
-                    decoration: BoxDecoration(
-                      color: (unassigned
-                              ? AppTheme.textSecondary
-                              : AppTheme.primary)
-                          .withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(13),
-                    ),
-                    child: Icon(
-                        unassigned ? Icons.person_off : Icons.person,
-                        color: unassigned
-                            ? AppTheme.textSecondary
-                            : AppTheme.primary,
-                        size: 22),
-                  ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(name,
-                            style: Theme.of(context).textTheme.titleSmall),
-                        const SizedBox(height: 2),
-                        Text('$entries ${entries == 1 ? 'entry' : 'entries'} · ${(share * 100).toStringAsFixed(0)}% of spend',
-                            style: Theme.of(context).textTheme.bodySmall),
-                        const SizedBox(height: 8),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: share,
-                            minHeight: 6,
-                            backgroundColor: AppTheme.divider,
-                            valueColor: AlwaysStoppedAnimation(unassigned
-                                ? AppTheme.textSecondary
-                                : AppTheme.primary),
-                          ),
+            return ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: rows.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
+              itemBuilder: (context, i) {
+                final r = rows[i];
+                final total = r.total;
+                final entries = r.entries;
+                final share = grand > 0 ? total / grand : 0.0;
+                final name = r.label;
+                final unassigned = name == 'Unassigned';
+
+                return AppCard(
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: (unassigned
+                                  ? AppTheme.textSecondary
+                                  : AppTheme.primary)
+                              .withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(13),
                         ),
-                      ],
-                    ),
+                        child: Icon(
+                            unassigned ? Icons.person_off : Icons.person,
+                            color: unassigned
+                                ? AppTheme.textSecondary
+                                : AppTheme.primary,
+                            size: 22),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(name,
+                                style: Theme.of(context).textTheme.titleSmall),
+                            const SizedBox(height: 2),
+                            Text(
+                                '$entries ${entries == 1 ? 'entry' : 'entries'} · ${(share * 100).toStringAsFixed(0)}% of spend',
+                                style: Theme.of(context).textTheme.bodySmall),
+                            const SizedBox(height: 8),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: LinearProgressIndicator(
+                                value: share,
+                                minHeight: 6,
+                                backgroundColor: AppTheme.divider,
+                                valueColor: AlwaysStoppedAnimation(unassigned
+                                    ? AppTheme.textSecondary
+                                    : AppTheme.primary),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Text(money.format(total),
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w800,
+                              color: AppTheme.primary)),
+                    ],
                   ),
-                  const SizedBox(width: 12),
-                  Text(money.format(total),
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          color: AppTheme.primary)),
-                ],
-              ),
+                );
+              },
             );
           },
         );
-      },
-    );
   }
 }
 
@@ -642,62 +598,60 @@ class _MenuWiseTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<List<Map<String, Object?>>>(
-      future: ref.read(repositoryProvider).getMenuWiseTotals(range.from, range.to),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final rows = snap.data!;
-        if (rows.isEmpty) {
-          return const Center(child: Text('No menu expenses in this range.'));
-        }
-        final grand = rows.fold<double>(
-            0, (s, r) => s + ((r['total'] as num?)?.toDouble() ?? 0));
-        return ListView.separated(
-          padding: const EdgeInsets.all(16),
-          itemCount: rows.length,
-          separatorBuilder: (_, _) => const SizedBox(height: 10),
-          itemBuilder: (context, i) {
-            final r = rows[i];
-            final total = (r['total'] as num?)?.toDouble() ?? 0;
-            final share = grand > 0 ? total / grand : 0.0;
-            return AppCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return ref.watch(reportBundleProvider).when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(child: Text('Could not load: $e')),
+          data: (bundle) {
+            final rows = bundle.byMenu(dayKey(range.from), dayKey(range.to));
+            if (rows.isEmpty) {
+              return const Center(child: Text('No menu expenses in this range.'));
+            }
+
+            final grand = rows.fold<double>(0, (s, r) => s + r.total);
+            return ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: rows.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
+              itemBuilder: (context, i) {
+                final r = rows[i];
+                final total = r.total;
+                final share = grand > 0 ? total / grand : 0.0;
+                return AppCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(r['name'] as String,
-                          style: Theme.of(context).textTheme.titleMedium),
-                      Text(money.format(total),
-                          style: const TextStyle(
-                              fontWeight: FontWeight.w800,
-                              color: AppTheme.primary)),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(r.label,
+                              style: Theme.of(context).textTheme.titleMedium),
+                          Text(money.format(total),
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  color: AppTheme.primary)),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: LinearProgressIndicator(
+                          value: share,
+                          minHeight: 8,
+                          backgroundColor: AppTheme.divider,
+                          valueColor:
+                              const AlwaysStoppedAnimation(AppTheme.primary),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text('${(share * 100).toStringAsFixed(1)}% of spending',
+                          style: Theme.of(context).textTheme.bodySmall),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: LinearProgressIndicator(
-                      value: share,
-                      minHeight: 8,
-                      backgroundColor: AppTheme.divider,
-                      valueColor:
-                          const AlwaysStoppedAnimation(AppTheme.primary),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text('${(share * 100).toStringAsFixed(1)}% of spending',
-                      style: Theme.of(context).textTheme.bodySmall),
-                ],
-              ),
+                );
+              },
             );
           },
         );
-      },
-    );
   }
 }
 
@@ -709,61 +663,59 @@ class _ItemWiseTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<List<Map<String, Object?>>>(
-      future: ref.read(repositoryProvider).getItemWiseTotals(range.from, range.to),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final rows = snap.data!;
-        if (rows.isEmpty) {
-          return const Center(child: Text('No item expenses in this range.'));
-        }
-        final grand = rows.fold<double>(
-            0, (s, r) => s + ((r['total'] as num?)?.toDouble() ?? 0));
-        return ListView.separated(
-          padding: const EdgeInsets.all(16),
-          itemCount: rows.length,
-          separatorBuilder: (_, _) => const SizedBox(height: 10),
-          itemBuilder: (context, i) {
-            final r = rows[i];
-            final total = (r['total'] as num?)?.toDouble() ?? 0;
-            final share = grand > 0 ? total / grand : 0.0;
-            return AppCard(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(r['name'] as String,
-                            style: Theme.of(context).textTheme.titleSmall),
-                        const SizedBox(height: 6),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: share,
-                            minHeight: 6,
-                            backgroundColor: AppTheme.divider,
-                            valueColor:
-                                const AlwaysStoppedAnimation(AppTheme.secondary),
-                          ),
+    return ref.watch(reportBundleProvider).when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(child: Text('Could not load: $e')),
+          data: (bundle) {
+            final rows = bundle.byItem(dayKey(range.from), dayKey(range.to));
+            if (rows.isEmpty) {
+              return const Center(child: Text('No item expenses in this range.'));
+            }
+
+            final grand = rows.fold<double>(0, (s, r) => s + r.total);
+            return ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: rows.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
+              itemBuilder: (context, i) {
+                final r = rows[i];
+                final total = r.total;
+                final share = grand > 0 ? total / grand : 0.0;
+                return AppCard(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(r.label,
+                                style: Theme.of(context).textTheme.titleSmall),
+                            const SizedBox(height: 6),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: LinearProgressIndicator(
+                                value: share,
+                                minHeight: 6,
+                                backgroundColor: AppTheme.divider,
+                                valueColor: const AlwaysStoppedAnimation(
+                                    AppTheme.secondary),
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(width: 16),
+                      Text(money.format(total),
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w800,
+                              color: AppTheme.secondary)),
+                    ],
                   ),
-                  const SizedBox(width: 16),
-                  Text(money.format(total),
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          color: AppTheme.secondary)),
-                ],
-              ),
+                );
+              },
             );
           },
         );
-      },
-    );
   }
 }
 
@@ -776,79 +728,89 @@ class _MembersTab extends ConsumerWidget {
     final month = monthKey(range.from);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<List<Map<String, Object?>>>(
-      future: ref.read(repositoryProvider).getMonthCollections(month),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final rows = snap.data!;
-        if (rows.isEmpty) {
-          return const Center(
-              child: Text('No collections set for this month yet.'));
-        }
-        return ListView.separated(
-          padding: const EdgeInsets.all(16),
-          itemCount: rows.length,
-          separatorBuilder: (_, _) => const SizedBox(height: 10),
-          itemBuilder: (context, i) {
-            final r = rows[i];
-            final due = (r['amount_due'] as num?)?.toDouble() ?? 0;
-            final paid = (r['paid'] as num?)?.toDouble() ?? 0;
-            final remaining = due - paid;
-            final overpaid = paid - due;
-            return AppCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(r['member_name'] as String,
-                      style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return ref.watch(reportBundleProvider).when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(child: Text('Could not load: $e')),
+          data: (bundle) {
+            // A member with no document at all is left out: a share of zero and
+            // no share recorded are different things, and showing "PKR 0 due" for
+            // somebody the owner never set a share for would be a claim, not a
+            // reading.
+            final rows = bundle
+                .collectionsFor(month)
+                .where((c) => c.amountDue > 0 || c.payments.isNotEmpty)
+                .toList();
+
+            if (rows.isEmpty) {
+              return const Center(
+                  child: Text('No collections set for this month yet.'));
+            }
+
+            rows.sort((a, b) => a.email.compareTo(b.email));
+
+            return ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: rows.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
+              itemBuilder: (context, i) {
+                final c = rows[i];
+                final due = c.amountDue;
+                final paid = c.paid;
+                final remaining = due - paid;
+                final overpaid = paid - due;
+
+                return AppCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Paid ${money.format(paid)}',
-                          style: Theme.of(context).textTheme.bodyMedium),
-                      if (due > 0 && overpaid > 0)
-                        Text(
-                          '${money.format(overpaid)} extra',
-                          style: const TextStyle(
-                            color: AppTheme.success,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        )
-                      else if (remaining > 0)
-                        Text(
-                          '${money.format(remaining)} remaining',
-                          style: const TextStyle(
-                            color: AppTheme.error,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        )
-                      else if (due > 0)
-                        const Text(
-                          'Fully paid',
-                          style: TextStyle(
-                            color: AppTheme.success,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        )
-                      else
-                        const Text(
-                          'No share set',
-                          style: TextStyle(
-                            color: AppTheme.textSecondary,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
+                      Text(bundle.nameOf(c.email) ?? c.email.split('@').first,
+                          style: Theme.of(context).textTheme.titleMedium),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text('Paid ${money.format(paid)}',
+                              style: Theme.of(context).textTheme.bodyMedium),
+                          if (due > 0 && overpaid > 0)
+                            Text(
+                              '${money.format(overpaid)} extra',
+                              style: const TextStyle(
+                                color: AppTheme.success,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            )
+                          else if (remaining > 0)
+                            Text(
+                              '${money.format(remaining)} remaining',
+                              style: const TextStyle(
+                                color: AppTheme.error,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            )
+                          else if (due > 0)
+                            const Text(
+                              'Fully paid',
+                              style: TextStyle(
+                                color: AppTheme.success,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            )
+                          else
+                            const Text(
+                              'No share set',
+                              style: TextStyle(
+                                color: AppTheme.textSecondary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                        ],
+                      ),
                     ],
                   ),
-                ],
-              ),
+                );
+              },
             );
           },
         );
-      },
-    );
   }
 }

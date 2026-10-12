@@ -121,6 +121,22 @@ class MonthFigures {
   }
 }
 
+/// One day in the daily report.
+class DayRow {
+  /// `yyyy-MM-dd`.
+  final String day;
+
+  /// Meals cooked that day.
+  final double food;
+
+  /// Other expenses that day.
+  final double other;
+
+  const DayRow(this.day, this.food, this.other);
+
+  double get total => food + other;
+}
+
 /// All shared data the reports read, with every figure worked out from it.
 class ReportBundle {
   final String messId;
@@ -248,6 +264,37 @@ class ReportBundle {
   }
 
   // ---- Grouped reports ----
+
+  /// Every day in [from]..[to] that had something recorded on it.
+  ///
+  /// Only days with entries, not every day of the range: a report listing thirty
+  /// empty days buries the two that matter. Gaps still read as gaps, because the
+  /// trend chart spaces points by date.
+  List<DayRow> dailyTotals(String from, String to) {
+    final food = <String, double>{};
+    final other = <String, double>{};
+
+    for (final e in mealsIn(from, to)) {
+      food[e.date] = (food[e.date] ?? 0) + e.total;
+    }
+    for (final e in otherIn(from, to)) {
+      other[e.date] = (other[e.date] ?? 0) + e.amount;
+    }
+
+    final days = <String>{...food.keys, ...other.keys}.toList()..sort();
+
+    return [
+      for (final d in days) DayRow(d, food[d] ?? 0, other[d] ?? 0),
+    ];
+  }
+
+  /// Meals and other expenses on one day, ready to list.
+  ({List<CloudExpense> meals, List<CloudOtherExpense> other}) dayEntries(
+      String day) =>
+      (
+        meals: meals.where((e) => e.date == day).toList(),
+        other: other.where((e) => e.date == day).toList(),
+      );
 
   /// Spend grouped by whoever cooked.
   ///
