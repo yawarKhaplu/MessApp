@@ -200,12 +200,12 @@ class TurnCard extends ConsumerWidget {
               ListTile(
                 leading: CircleAvatar(
                   child: Text(
-                    (m.name ?? m.email).isNotEmpty
-                        ? (m.name ?? m.email)[0].toUpperCase()
+                    (m.displayName).isNotEmpty
+                        ? (m.displayName)[0].toUpperCase()
                         : '?',
                   ),
                 ),
-                title: Text(m.name ?? m.email),
+                title: Text(m.displayName),
                 subtitle: m.hasSignedIn ? null : const Text('Not signed in yet'),
                 onTap: () => Navigator.pop(ctx, m),
               ),

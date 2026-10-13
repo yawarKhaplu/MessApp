@@ -34,10 +34,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   void _startQueries() {
-    // The budget and today's entries both come from the shared bundle now, so
-    // there is nothing to fetch here beyond asking the providers to re-read.
-    ref.invalidate(todayBudgetProvider);
-    ref.invalidate(sharedExpensesProvider(monthKey(DateTime.now())));
+    // Everything is read through providers now; asking them to re-read during
+    // initState is what produced the "dependOnInherited... was called before
+    // initState completed" error — the tree was not mounted yet. The first real
+    // read happens after the frame, in _refresh().
   }
 
   Future<void> _refresh() async {
@@ -69,7 +69,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     Icon(Icons.person_outline,
                         size: 18, color: AppTheme.primary),
                     const SizedBox(width: 10),
-                    Expanded(child: Text(m.name ?? m.email)),
+                    Expanded(child: Text(m.displayName)),
                     if (m.email.toLowerCase() ==
                         turn.today?.email.toLowerCase())
                       const AppBadge(
@@ -904,7 +904,7 @@ String _nextTurnHint(MessTurn turn, String? email) {
 }
 
 /// Best available name for someone in the roster.
-String _who(MessMember member) => member.name ?? member.email;
+String _who(MessMember member) => member.displayName;
 
 /// Looks a person up in the shared roster by address.
 ///

@@ -397,14 +397,14 @@ Future<void> _manageMembers() async {
       color = AppTheme.error;
     }
 
-    final label = member.name ?? member.email;
+    final label = member.displayName;
                 return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: AppCard(
         onTap: () {
           Navigator.of(context).push(MaterialPageRoute(
             builder: (_) => MemberDetailScreen(
-                name: member.name ?? member.email,
+                name: member.displayName,
                 email: member.email,
                 month: month),
           ));

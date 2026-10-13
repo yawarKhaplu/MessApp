@@ -169,8 +169,8 @@ class _MemberTile extends ConsumerWidget {
         radius: 19,
         backgroundColor: AppTheme.secondary.withOpacity(0.12),
         child: Text(
-          (member.name ?? member.email).isNotEmpty
-              ? (member.name ?? member.email)[0].toUpperCase()
+          (member.displayName).isNotEmpty
+              ? (member.displayName)[0].toUpperCase()
               : '?',
           style: const TextStyle(
               color: AppTheme.secondary, fontWeight: FontWeight.w600),
@@ -230,7 +230,7 @@ class _MemberTile extends ConsumerWidget {
       builder: (ctx) => AlertDialog(
         title: const Text('Remove from mess?'),
         content: Text(
-          '${member.name ?? member.email} will no longer see this mess. '
+          '${member.displayName} will no longer see this mess. '
           'They can be added again any time.',
         ),
         actions: [
@@ -256,7 +256,7 @@ class _MemberTile extends ConsumerWidget {
       ref.invalidate(activeMessProvider);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Removed ${member.name ?? member.email}'),
+          content: Text('Removed ${member.displayName}'),
         ),
       );
     } on CloudMessage catch (e) {

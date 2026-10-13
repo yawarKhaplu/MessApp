@@ -438,7 +438,7 @@ class _RotationCard extends ConsumerWidget {
                     Icon(Icons.person_outline,
                         size: 18, color: AppTheme.primary),
                     const SizedBox(width: 10),
-                    Expanded(child: Text(m.name ?? m.email)),
+                    Expanded(child: Text(m.displayName)),
                     if (m.email.toLowerCase() ==
                         turn.today?.email.toLowerCase())
                       const AppBadge(

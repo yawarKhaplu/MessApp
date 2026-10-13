@@ -291,6 +291,7 @@ Future<String> saveExpense({
   required WidgetRef ref,
   required String date,
   required String menuName,
+  String? menuId,
   required String cookEmail,
   required List<CloudExpenseItem> items,
 }) async {
@@ -328,6 +329,7 @@ Future<String> saveExpense({
         messId: mess.id,
         date: date,
         menuName: menuName,
+        menuId: menuId,
         cookEmail: cookEmail,
         items: items,
         roster: mess.members,

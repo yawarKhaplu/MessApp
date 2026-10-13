@@ -113,7 +113,7 @@ class _EditExpenseScreenState extends ConsumerState<EditExpenseScreen> {
       context,
       members: [
         for (final m in people)
-          Member(id: null, name: m.name ?? m.email, email: m.email),
+          Member(id: null, name: m.displayName, email: m.email),
       ],
       currentEmail: _cookEmail,
       turnIndex: turnIndex,
@@ -137,7 +137,7 @@ String? _cookName(BuildContext context) {
 
   final roster = ref.read(activeMessProvider).valueOrNull?.members ?? const [];
   for (final m in roster) {
-    if (m.email.trim().toLowerCase() == email) return m.name ?? m.email;
+    if (m.email.trim().toLowerCase() == email) return m.displayName;
   }
   return email.split('@').first;
 }
@@ -255,6 +255,7 @@ String? _cookName(BuildContext context) {
         expenseId: widget.entry.id,
         date: dayKey(_date),
         menuName: widget.entry.menuName,
+        menuId: widget.entry.menuId,
         cookEmail: _cookEmail ?? widget.entry.cookEmail,
         items: entries,
       );

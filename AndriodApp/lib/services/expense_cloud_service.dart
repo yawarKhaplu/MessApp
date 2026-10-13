@@ -14,6 +14,11 @@ class CloudExpense {
   /// still reads sensibly after the menu is renamed or removed.
   final String menuName;
 
+  /// The shared menu this was entered from, by its durable id. Kept separately
+  /// from the name, so renaming the menu does not break the hint history.
+  /// Nullable for entries written before this field existed.
+  final String? menuId;
+
   final double total;
 
   /// Who cooked, by email. This is the person whose turn it was, and the only
@@ -32,6 +37,7 @@ class CloudExpense {
     required this.id,
     required this.date,
     required this.menuName,
+    this.menuId,
     required this.total,
     required this.cookEmail,
     this.recordedBy,
@@ -58,6 +64,7 @@ class CloudExpense {
       id: id,
       date: '${data['date'] ?? ''}',
       menuName: '${data['menuName'] ?? ''}',
+      menuId: data['menuId'] as String?,
       total: (data['total'] as num?)?.toDouble() ?? 0,
       cookEmail: '${data['cookEmail'] ?? ''}'.toLowerCase(),
       recordedBy: data['recordedBy'] as String?,
@@ -69,6 +76,7 @@ class CloudExpense {
   Map<String, Object?> toDoc() => {
         'date': date,
         'menuName': menuName,
+        'menuId': menuId,
         'total': total,
         'cookEmail': cookEmail.toLowerCase(),
         'recordedBy': recordedBy,

@@ -91,7 +91,7 @@ class _RotationOrderScreenState extends ConsumerState<RotationOrderScreen> {
     await _save(anchorEmail: m.email);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('${m.name ?? m.email} has the bari today')),
+      SnackBar(content: Text('${m.displayName} has the bari today')),
     );
   }
 
@@ -188,7 +188,7 @@ class _RotationOrderScreenState extends ConsumerState<RotationOrderScreen> {
                                           CrossAxisAlignment.start,
                                       children: [
                                         Text(
-                                          m.name ?? m.email,
+                                          m.displayName,
                                           overflow: TextOverflow.ellipsis,
                                           style: const TextStyle(
                                               fontWeight: FontWeight.w700),

@@ -39,6 +39,19 @@ class MessMember {
 
   bool get hasSignedIn => uid.isNotEmpty;
 
+  /// What to show for this person. A Firebase display name may be missing
+  /// altogether, or may just be the address again, in which case the local
+  /// part of the email is clearer than the whole thing. This keeps every screen
+  /// consistent instead of each one reinventing its own fallback.
+  String get displayName {
+    final n = (name ?? '').trim();
+    if (n.isNotEmpty && !n.contains('@') && n.toLowerCase() != email.toLowerCase()) {
+      return n;
+    }
+    final local = email.split('@').first.trim();
+    return local.isEmpty ? email : local;
+  }
+
   /// Builds a seat from its entry in the mess document's members map. The map is
   /// keyed by the lowercased email, which is the same key used by the rules.
   factory MessMember.fromEntry(String email, Map<dynamic, dynamic> entry) {
@@ -833,6 +846,7 @@ class MessCloudService {
     required String messId,
     required String date,
     required String menuName,
+    String? menuId,
     required String cookEmail,
     required List<CloudExpenseItem> items,
     required List<MessMember> roster,
@@ -855,6 +869,7 @@ class MessCloudService {
         // timestamp against request.time. The text date is what the app reads.
         'dateTime': Timestamp.fromDate(DateTime.parse(date)),
         'menuName': menuName,
+        'menuId': menuId,
         'total': total,
         'cookEmail': cookEmail.trim().toLowerCase(),
         'recordedBy': _myEmail,
@@ -882,6 +897,7 @@ class MessCloudService {
     required String expenseId,
     required String date,
     required String menuName,
+    String? menuId,
     required String cookEmail,
     required List<CloudExpenseItem> items,
   }) async {
@@ -895,6 +911,7 @@ class MessCloudService {
         'date': date,
         'dateTime': Timestamp.fromDate(DateTime.parse(date)),
         'menuName': menuName,
+        'menuId': menuId,
         'total': total,
         'cookEmail': cookEmail.trim().toLowerCase(),
         'items': {for (final i in items) i.id: i.toDoc()},

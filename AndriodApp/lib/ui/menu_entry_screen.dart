@@ -8,6 +8,7 @@ import '../providers.dart';
 import '../services/expense_cloud_service.dart';
 import '../services/mess_cloud_service.dart';
 import '../services/menu_cloud_service.dart';
+import '../services/report_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'widgets/item_dialog.dart';
@@ -136,7 +137,7 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
         _qtyCtrl(item);
         _bind(item);
       }
-      _hints = await repo.getSplitHints(_menu!.name);
+      if (_menu != null) _hints = await _loadHints(_menu!);
     }
     // Default: whoever is on cooking turn for the selected date.
     _member = await repo.getCookOfTheDay(_date);
@@ -147,6 +148,76 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
   /// Items for a menu, read from the catalogue already loaded.
   List<CloudMenuItem> _catalogueItems(String menuId) =>
       ref.read(menusProvider).valueOrNull?.byId(menuId)?.items ?? const [];
+
+  /// Split history learned from shared expenses with the same menu. Learned
+  /// from the menu's id rather than its name, so renaming it does not drop its
+  /// history. Falls back to the name for entries written before ids were saved.
+  Future<SplitHints> _loadHints(CloudMenu menu) async {
+    final bundle = await ref.read(reportBundleProvider.future);
+    return _hintsForMenu(menu, bundle);
+  }
+
+  static SplitHints _hintsForMenu(CloudMenu menu, ReportBundle bundle) {
+    final menuId = menu.id;
+    final menuName = menu.name.trim().toLowerCase();
+    final matching = bundle.meals.where((e) {
+      if (menuId.isNotEmpty && e.menuId != null && e.menuId!.isNotEmpty) {
+        return e.menuId == menuId;
+      }
+      return e.menuName.trim().toLowerCase() == menuName;
+    }).toList();
+    // Newest first, so the exact split comes from the latest real entry.
+    matching.sort((a, b) {
+      final ad = a.createdAt;
+      final bd = b.createdAt;
+      if (ad != null && bd != null) return bd.compareTo(ad);
+      return b.date.compareTo(a.date);
+    });
+
+    // A single real entry gives the exact proportions.
+    for (final e in matching) {
+      if (e.total <= 0 || e.items.isEmpty) continue;
+      final amounts = <String, double>{};
+      var sum = 0.0;
+      for (final i in e.items) {
+        final key = i.name.trim().toLowerCase();
+        amounts[key] = (amounts[key] ?? 0) + i.lineTotal;
+        sum += i.lineTotal;
+      }
+      if (sum > 0 && amounts.isNotEmpty) {
+        return SplitHints(
+          {for (final x in amounts.entries) x.key: x.value / sum},
+          e.createdAt,
+          isExact: true,
+        );
+      }
+    }
+
+    // Otherwise average the per-item amounts across every entry seen.
+    final itemSum = <String, double>{};
+    final itemCount = <String, int>{};
+    for (final e in matching) {
+      final perItem = <String, double>{};
+      for (final i in e.items) {
+        final key = i.name.trim().toLowerCase();
+        perItem[key] = (perItem[key] ?? 0) + i.lineTotal;
+      }
+      for (final x in perItem.entries) {
+        itemSum[x.key] = (itemSum[x.key] ?? 0) + x.value;
+        itemCount[x.key] = (itemCount[x.key] ?? 0) + 1;
+      }
+    }
+    if (itemSum.isEmpty) return SplitHints.empty;
+    final avg = <String, double>{};
+    var total = 0.0;
+    for (final x in itemSum.entries) {
+      final a = x.value / (itemCount[x.key] ?? 1);
+      avg[x.key] = a;
+      total += a;
+    }
+    if (total <= 0) return SplitHints.empty;
+    return SplitHints({for (final x in avg.entries) x.key: x.value / total}, null);
+  }
 
   /// Creates a menu and immediately selects it, so a brand new menu can be
   /// used without leaving this screen.
@@ -183,7 +254,7 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
     _clearControllers();
     final repo = ref.read(repositoryProvider);
     _items = _catalogueItems(picked.id);
-    _hints = await repo.getSplitHints(picked.name);
+    _hints = await _loadHints(picked);
     for (final item in _items) {
       _priceCtrl(item);
       _qtyCtrl(item);
@@ -393,7 +464,7 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
                   .read(menusProvider.notifier)
                   .addItem(_menu!.id, itemName, amount);
               ref.invalidate(menusProvider);
-              _hints = await repo.getSplitHints(_menu!.name);
+              if (_menu != null) _hints = await _loadHints(_menu!);
               if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('"$itemName" saved to ${_menu!.name}')),
@@ -511,7 +582,10 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
     // Make sure we're splitting with fresh history.
     var hints = _hints;
     if (_menu != null) {
-      hints = await ref.read(repositoryProvider).getSplitHints(_menu!.id!);
+      if (_menu != null) {
+        final bundle = await ref.read(reportBundleProvider.future);
+        hints = _hintsForMenu(_menu!, bundle);
+      }
     }
 
     final shares = hints?.shares ?? const <String, double>{};
@@ -617,6 +691,7 @@ class _MenuEntryScreenState extends ConsumerState<MenuEntryScreen> {
             ref: ref,
             date: dayKey(_date),
             menuName: _menu?.name ?? 'Entry',
+            menuId: _menu?.id,
             cookEmail: cook,
             items: [
               for (var i = 0; i < entries.length; i++)
