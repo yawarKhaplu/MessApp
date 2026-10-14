@@ -412,10 +412,19 @@ class _DailyTab extends ConsumerWidget {
                 child: AppCard(
                   padding: const EdgeInsets.all(12),
                   onTap: () async {
-                    // Already the shared entry, so it goes straight to the
-                    // editor. The lookup this used to do existed only because the
-                    // report was reading local rows while the editor took a
-                    // Firestore one.
+                    // Owners and the member who recorded (or was assigned as
+                    // cook) may edit today's entry. The server enforces the
+                    // same shape, so a denied tap only hides a dead button.
+                    final mess = ref.read(activeMessProvider).valueOrNull;
+                    if (mess != null &&
+                        !mayEditExpense(
+                          mess: mess,
+                          email: ref.read(currentUserProvider).valueOrNull?.email,
+                          recordedBy: e.recordedBy ?? '',
+                          cookEmail: e.cookEmail,
+                        )) {
+                      return;
+                    }
                     final entry = e;
                     Navigator.pop(ctx);
 

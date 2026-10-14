@@ -136,10 +136,12 @@ service cloud.firestore {
         // Editing. The owner may change anything; a correction changes what the
         // mess owes and the owner is answerable for that.
         //
-        // The turn member may correct only an entry they recorded themselves.
-        // Being on turn is not checkable here, so the app applies that half, but
-        // "my own entry" is, and without it whoever is cooking could rewrite a
-        // meal somebody else entered — the exact thing the turn prevents.
+        // A turn member may correct an entry they recorded. When the owner
+        // assigns the cook on an entry, that assigned cook may also correct it.
+        // Being on turn is not checkable here, so the app applies that half,
+        // but "my own entry" and "the cook I was assigned as" are, and without
+        // them whoever is cooking could rewrite a meal somebody else entered —
+        // the exact thing the turn prevents.
         //
         // Three fields are pinned so the permission cannot be laundered into
         // ownership of the record: recordedBy cannot be changed to match
@@ -148,7 +150,9 @@ service cloud.firestore {
         // mention a field permit it to change, so each one has to be named.
         allow update: if isOwnerOfMess(messId)
           || (isMemberOfMess(messId)
-              && resource.data.recordedBy == request.auth.token.email.lower()
+              && (resource.data.recordedBy == request.auth.token.email.lower()
+                  || (resource.data.cookEmail != null
+                      && resource.data.cookEmail == request.auth.token.email.lower()))
               && request.resource.data.recordedBy
                    == request.auth.token.email.lower()
               && request.resource.data.visibleTo == resource.data.visibleTo
@@ -157,12 +161,14 @@ service cloud.firestore {
                    >= request.time - duration.value(1, 'd'));
 
         // Removing follows the same split: the owner may remove any entry, and
-        // the turn member only one of their own. An entry nobody may delete is
-        // an entry nobody can take back, so this mirrors update rather than
-        // being owner-only.
+        // the cook the owner assigned may remove one of their own. An entry
+        // nobody may delete is an entry nobody can take back, so this mirrors
+        // update rather than being owner-only.
         allow delete: if isOwnerOfMess(messId)
           || (isMemberOfMess(messId)
-              && resource.data.recordedBy == request.auth.token.email.lower());
+              && (resource.data.recordedBy == request.auth.token.email.lower()
+                  || (resource.data.cookEmail != null
+                      && resource.data.cookEmail == request.auth.token.email.lower())));
       }
 
       // Monthly collections and the payments against them.

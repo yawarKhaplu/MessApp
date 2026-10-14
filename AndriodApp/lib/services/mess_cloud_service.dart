@@ -235,15 +235,30 @@ bool mayEditExpense({
   required Mess mess,
   required String? email,
   required String recordedBy,
+  String? cookEmail,
 }) {
+  // The owner may correct anything on the mess's behalf.
   if (mess.isOwner) return true;
 
   final lower = (email ?? '').trim().toLowerCase();
   if (lower.isEmpty) return false;
 
-  if (recordedBy.trim().toLowerCase() != lower) return false;
+  final recorderLower = recordedBy.trim().toLowerCase();
+  final cookLower = (cookEmail ?? '').trim().toLowerCase();
 
-  return mess.turn.isTodayFor(lower);
+  // Those responsible for an entry may correct it: the person who recorded it,
+  // or the cook the owner assigned on it. The rules hold the same two-part
+  // test, so neither is trusted from the UI alone.
+  final allowedByOwnership =
+      recorderLower == lower || (cookLower.isNotEmpty && cookLower == lower);
+  if (!allowedByOwnership) return false;
+
+  // Somebody who merely is tagged as cook has not earned the edit for entries
+  // they did not record today, but a cook who was on turn at the time did.
+  if (recorderLower == lower) {
+    return mess.turn.isTodayFor(lower);
+  }
+  return true;
 }
 
 /// Checks that [date] is a full `yyyy-MM-dd` day.

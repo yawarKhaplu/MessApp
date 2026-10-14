@@ -707,6 +707,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                   mess: mess,
                                   email: myEmail,
                                   recordedBy: e.recordedBy ?? '',
+                                  cookEmail: e.cookEmail,
                                 ),
 
                             // Name from the shared roster, so the row reads
