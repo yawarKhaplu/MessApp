@@ -153,8 +153,7 @@ service cloud.firestore {
               && (resource.data.recordedBy == request.auth.token.email.lower()
                   || (resource.data.cookEmail != null
                       && resource.data.cookEmail == request.auth.token.email.lower()))
-              && request.resource.data.recordedBy
-                   == request.auth.token.email.lower()
+              && request.resource.data.recordedBy == resource.data.recordedBy
               && request.resource.data.visibleTo == resource.data.visibleTo
               && request.resource.data.dateTime <= request.time
               && request.resource.data.dateTime
