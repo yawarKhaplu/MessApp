@@ -1016,7 +1016,11 @@ class MessCloudService {
     return ReportBundle(
       messId: messId,
       roster: roster,
-      meals: await allExpenses(messId, months.toList()),
+      // _visibleExpenses already holds every expense this person may read, so
+      // no month filtering is applied here. Filtering by guesses such as "the
+      // current month and other-expense months" is what made a year of history
+      // disappear from the reports and the spending graph.
+      meals: await _visibleExpenses(messId),
       other: other,
       collections: collections,
       categories: await otherCategories(messId),

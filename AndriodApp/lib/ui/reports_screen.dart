@@ -158,14 +158,14 @@ class _WalletTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<Map<String, double>>(
-      future: _walletTotals(ref, range.from, range.to),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final collected = snap.data!['collected']!;
-        final spent = snap.data!['spent']!;
+    return ref.watch(reportBundleProvider).when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, _) => const Center(child: CircularProgressIndicator()),
+      data: (bundle) {
+        final collected =
+            bundle.collectedBetween(dayKey(range.from), dayKey(range.to)).collected;
+        final spent =
+            bundle.spentBetween(dayKey(range.from), dayKey(range.to));
         final balance = collected - spent;
 
         return ListView(
