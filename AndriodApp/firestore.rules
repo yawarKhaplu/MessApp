@@ -110,8 +110,11 @@ service cloud.firestore {
       // do. Keying on addresses means visibility works from the moment the owner
       // adds somebody, with no second sign-in needed before history appears.
       match /expenses/{expenseId} {
-        allow read: if request.auth != null
-          && request.auth.token.email.lower() in resource.data.visibleTo;
+        // Transparency over transparency: every member of a mess reads every meal
+        // recorded in it, including one who has just joined. The original
+        // address list made a new member's totals (and their view of reports)
+        // disagree with the people who were already there.
+        allow read: if isOwnerOfMess(messId) || isMemberOfMess(messId);
 
         // The owner may record anything, on anyone's behalf.
         //

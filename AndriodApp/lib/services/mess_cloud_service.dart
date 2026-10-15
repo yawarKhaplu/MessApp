@@ -807,9 +807,13 @@ class MessCloudService {
     final email = _myEmail;
     if (email == null) return const [];
 
+    // Every member of a mess reads every meal in that mess. That is what makes
+    // the wallet, the totals and the reports agree across members, and lets
+    // somebody who has just been added catch up on the current month instead
+    // of seeing a silently partial list. The rules enforce membership rather
+    // than this field, so no `where` clause is needed here.
     final snap = await _db
         .collection('$_messes/$messId/expenses')
-        .where('visibleTo', arrayContains: email)
         .get();
 
     final list = snap.docs
