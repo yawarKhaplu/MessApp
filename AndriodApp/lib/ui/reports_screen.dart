@@ -308,7 +308,19 @@ class _DailyTab extends ConsumerWidget {
 
     return ref.watch(reportBundleProvider).when(
           loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => Center(child: Text('Could not load: $e')),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
           data: (bundle) {
             final days =
                 bundle.dailyTotals(dayKey(range.from), dayKey(range.to));
@@ -515,7 +527,19 @@ class _ByMemberTab extends ConsumerWidget {
 
     return ref.watch(reportBundleProvider).when(
           loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => Center(child: Text('Could not load: $e')),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
           data: (bundle) {
             final rows =
                 bundle.byCook(dayKey(range.from), dayKey(range.to));
@@ -609,7 +633,19 @@ class _MenuWiseTab extends ConsumerWidget {
 
     return ref.watch(reportBundleProvider).when(
           loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => Center(child: Text('Could not load: $e')),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
           data: (bundle) {
             final rows = bundle.byMenu(dayKey(range.from), dayKey(range.to));
             if (rows.isEmpty) {
@@ -674,7 +710,19 @@ class _ItemWiseTab extends ConsumerWidget {
 
     return ref.watch(reportBundleProvider).when(
           loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => Center(child: Text('Could not load: $e')),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
           data: (bundle) {
             final rows = bundle.byItem(dayKey(range.from), dayKey(range.to));
             if (rows.isEmpty) {
@@ -739,7 +787,19 @@ class _MembersTab extends ConsumerWidget {
 
     return ref.watch(reportBundleProvider).when(
           loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => Center(child: Text('Could not load: $e')),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
           data: (bundle) {
             // A member with no document at all is left out: a share of zero and
             // no share recorded are different things, and showing "PKR 0 due" for
