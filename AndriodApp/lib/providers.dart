@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'data/models.dart';
@@ -252,8 +253,33 @@ final sharedExpensesProvider =
     FutureProvider.autoDispose.family<List<CloudExpense>, String>((ref, month) async {
   final mess = await ref.watch(activeMessProvider.future);
   if (mess == null) return const [];
-  return ref.read(messCloudServiceProvider).expenses(mess.id, month);
+
+  for (var attempt = 0; attempt < 4; attempt++) {
+    try {
+      return await ref.read(messCloudServiceProvider).expenses(mess.id, month);
+    } on FirebaseException catch (e) {
+      if (e.code != 'unavailable' || attempt == 3) rethrow;
+      // Transient service state: back off and retry before surfacing it.
+      await Future.delayed(Duration(seconds: (1 << attempt)));
+    }
+  }
+  return const [];
 });
+
+// ---------- Reports ----------
+
+/// ...
+Future<ReportBundle> _loadReportBundle(String messId, MessCloudService service) async {
+  for (var attempt = 0; attempt < 4; attempt++) {
+    try {
+      return await service.reportBundle(messId);
+    } on FirebaseException catch (e) {
+      if (e.code != 'unavailable' || attempt == 3) rethrow;
+      await Future.delayed(Duration(seconds: (1 << attempt)));
+    }
+  }
+  return const ReportBundle.empty();
+}
 
 /// Today's entries, newest first.
 final todayExpensesProvider = Provider<List<CloudExpense>>((ref) {
@@ -358,7 +384,7 @@ final reportBundleProvider = FutureProvider.autoDispose<ReportBundle>((ref) asyn
   final mess = await ref.watch(activeMessProvider.future);
   if (mess == null) return const ReportBundle.empty();
 
-  return ref.read(messCloudServiceProvider).reportBundle(mess.id);
+  return _loadReportBundle(mess.id, ref.read(messCloudServiceProvider));
 });
 
 // ---------- Other expenses (shared) ----------
