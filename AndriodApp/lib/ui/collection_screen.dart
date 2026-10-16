@@ -18,23 +18,32 @@ class CollectionScreen extends ConsumerStatefulWidget {
   const CollectionScreen({super.key});
 
   @override
-  ConsumerState<CollectionScreen> createState() =>
-      _CollectionScreenState();
+  ConsumerState<CollectionScreen> createState() => _CollectionScreenState();
 }
 
 class _CollectionScreenState extends ConsumerState<CollectionScreen> {
-  double? _share;
+  Widget _loadError(Object error, String month) => Center(
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('Could not load: $error', textAlign: TextAlign.center),
+        TextButton(
+          onPressed: () => ref.invalidate(sharedCollectionsProvider(month)),
+          child: const Text('Retry'),
+        ),
+      ],
+    ),
+  );
 
   /// Opens the mess roster, which is the live list in Firestore.
-///
-/// Adding somebody here used to write a name into this device's own database,
-/// which meant they were invisible to the rest of the mess and could not sign
-/// in. Members are now real mess members with an email, so this goes to the
-/// screen that manages them.
-Future<void> _manageMembers() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const MembersScreen()),
-    );
+  ///
+  /// Adding somebody here used to write a name into this device's own database,
+  /// which meant they were invisible to the rest of the mess and could not sign
+  /// in. Members are now real mess members with an email, so this goes to the
+  /// screen that manages them.
+  Future<void> _manageMembers() async {
+    await Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => const MembersScreen()));
     // The roster is shared, so anything changed there has to be reflected back
     // into this screen's own data.
     ref.invalidate(activeMessProvider);
@@ -62,14 +71,18 @@ Future<void> _manageMembers() async {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('Remove "${member.name}"?'),
-        content: const Text('Member and their payment history will be removed.'),
+        content: const Text(
+          'Member and their payment history will be removed.',
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Remove')),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Remove'),
+          ),
         ],
       ),
     );
@@ -79,12 +92,22 @@ Future<void> _manageMembers() async {
   }
 
   Future<void> _setShare() async {
+    final month = monthKey(ref.read(selectedMonthProvider));
+    final shares = ref
+        .read(sharedCollectionsProvider(month))
+        .valueOrNull
+        ?.values
+        .map((c) => c.amountDue)
+        .toSet();
+    final share = shares?.length == 1 ? shares!.first : null;
     final value = await showDialog<String>(
       context: context,
       builder: (_) => TextInputDialog(
         title: 'Monthly share per member',
         hint: 'e.g. 2000',
-        initialValue: _share?.toStringAsFixed(0) ?? '',
+        initialValue: share != null && share > 0
+            ? share.toStringAsFixed(0)
+            : '',
         numeric: true,
       ),
     );
@@ -98,11 +121,10 @@ Future<void> _manageMembers() async {
 
     // Written to Firestore, so the share is the same for everyone in the mess
     // rather than only on this device.
-    setState(() => _share = amount);
-    final month = monthKey(ref.read(selectedMonthProvider));
-
     try {
-      await ref.read(messCloudServiceProvider).setMonthlyShareForAll(
+      await ref
+          .read(messCloudServiceProvider)
+          .setMonthlyShareForAll(
             messId: mess.id,
             month: month,
             amount: amount,
@@ -118,14 +140,18 @@ Future<void> _manageMembers() async {
 
   void _prevMonth() {
     final m = ref.read(selectedMonthProvider);
-    ref.read(selectedMonthProvider.notifier).state =
-        DateTime(m.year, m.month - 1);
+    ref.read(selectedMonthProvider.notifier).state = DateTime(
+      m.year,
+      m.month - 1,
+    );
   }
 
   void _nextMonth() {
     final m = ref.read(selectedMonthProvider);
-    ref.read(selectedMonthProvider.notifier).state =
-        DateTime(m.year, m.month + 1);
+    ref.read(selectedMonthProvider.notifier).state = DateTime(
+      m.year,
+      m.month + 1,
+    );
   }
 
   @override
@@ -141,11 +167,22 @@ Future<void> _manageMembers() async {
 
     // Collections belong to the owner. Members may browse every month and open
     // any member to read the figures, but nothing on this tab writes.
-    final isOwner =
-        ref.watch(activeMessProvider).valueOrNull?.isOwner ?? false;
+    final isOwner = ref.watch(activeMessProvider).valueOrNull?.isOwner ?? false;
 
-    final money =
-        NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
+    final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
+    final shareLabel = shared.when(
+      loading: () => 'loading…',
+      error: (_, __) => 'unavailable',
+      data: (collections) {
+        final shares = collections.values.map((c) => c.amountDue).toSet();
+        if (shares.isEmpty || shares.every((amount) => amount <= 0)) {
+          return 'not set';
+        }
+        return shares.length == 1
+            ? money.format(shares.first)
+            : 'varies by member';
+      },
+    );
 
     return Scaffold(
       appBar: AppBar(
@@ -155,15 +192,17 @@ Future<void> _manageMembers() async {
           // the shared roster rather than in this device's own table.
           if (isOwner)
             IconButton(
-                icon: const Icon(Icons.person_add),
-                tooltip: 'Add member to the mess',
-                onPressed: _manageMembers),
+              icon: const Icon(Icons.person_add),
+              tooltip: 'Add member to the mess',
+              onPressed: _manageMembers,
+            ),
         ],
       ),
       body: RefreshIndicator(
         onRefresh: () async {
-          ref.invalidate(monthCollectionsProvider);
-          ref.invalidate(membersProvider);
+          ref.invalidate(activeMessProvider);
+          ref.invalidate(sharedCollectionsProvider(monthKeyValue));
+          await ref.read(sharedCollectionsProvider(monthKeyValue).future);
         },
         color: AppTheme.primary,
         child: ListView(
@@ -175,8 +214,9 @@ Future<void> _manageMembers() async {
               child: Row(
                 children: [
                   IconButton(
-                      icon: const Icon(Icons.chevron_left),
-                      onPressed: _prevMonth),
+                    icon: const Icon(Icons.chevron_left),
+                    onPressed: _prevMonth,
+                  ),
                   Expanded(
                     // Tapping the month sets the shared monthly share, which is
                     // an owner action. Members can still move between months to
@@ -194,15 +234,16 @@ Future<void> _manageMembers() async {
                           Row(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              const Text('Share: ',
-                                  style: TextStyle(color: AppTheme.textSecondary)),
+                              const Text(
+                                'Share: ',
+                                style: TextStyle(color: AppTheme.textSecondary),
+                              ),
                               Text(
-                                _share == null
-                                    ? 'not set'
-                                    : money.format(_share!),
+                                shareLabel,
                                 style: const TextStyle(
-                                    color: AppTheme.primary,
-                                    fontWeight: FontWeight.w700),
+                                  color: AppTheme.primary,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ],
                           ),
@@ -211,8 +252,9 @@ Future<void> _manageMembers() async {
                     ),
                   ),
                   IconButton(
-                      icon: const Icon(Icons.chevron_right),
-                      onPressed: _nextMonth),
+                    icon: const Icon(Icons.chevron_right),
+                    onPressed: _nextMonth,
+                  ),
                 ],
               ),
             ),
@@ -222,10 +264,9 @@ Future<void> _manageMembers() async {
             shared.when(
               loading: () => const Padding(
                 padding: EdgeInsets.all(16),
-                child:
-                    Center(child: CircularProgressIndicator()),
+                child: Center(child: CircularProgressIndicator()),
               ),
-              error: (e, _) => Center(child: Text('Error: $e')),
+              error: (e, _) => _loadError(e, monthKeyValue),
               data: (byEmail) {
                 // Worked out per member and floored at zero, so someone
                 // paying extra never cancels what the others still owe.
@@ -266,11 +307,20 @@ Future<void> _manageMembers() async {
                         mainAxisAlignment: MainAxisAlignment.spaceAround,
                         children: [
                           _summaryCol(
-                              'Collected', money.format(totalPaid), Colors.white),
-                          _summaryCol('Still to collect',
-                              money.format(stillDue), Colors.white70),
+                            'Collected',
+                            money.format(totalPaid),
+                            Colors.white,
+                          ),
                           _summaryCol(
-                              'Target', money.format(totalDue), Colors.white70),
+                            'Still to collect',
+                            money.format(stillDue),
+                            Colors.white70,
+                          ),
+                          _summaryCol(
+                            'Target',
+                            money.format(totalDue),
+                            Colors.white70,
+                          ),
                         ],
                       ),
                     ),
@@ -279,15 +329,20 @@ Future<void> _manageMembers() async {
                       Container(
                         width: double.infinity,
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 10),
+                          horizontal: 14,
+                          vertical: 10,
+                        ),
                         decoration: BoxDecoration(
                           color: AppTheme.accent.withOpacity(0.08),
                           borderRadius: BorderRadius.circular(14),
                         ),
                         child: Row(
                           children: [
-                            const Icon(Icons.savings_outlined,
-                                size: 17, color: AppTheme.accent),
+                            const Icon(
+                              Icons.savings_outlined,
+                              size: 17,
+                              color: AppTheme.accent,
+                            ),
                             const SizedBox(width: 9),
                             Expanded(
                               child: Text(
@@ -327,9 +382,8 @@ Future<void> _manageMembers() async {
               )
             else
               shared.when(
-                loading: () =>
-                    const Center(child: CircularProgressIndicator()),
-                error: (e, _) => Center(child: Text('Error: $e')),
+                loading: () => const Center(child: CircularProgressIndicator()),
+                error: (e, _) => _loadError(e, monthKeyValue),
                 data: (byEmail) => Column(
                   children: [
                     for (final member in mess.members)
@@ -355,16 +409,22 @@ Future<void> _manageMembers() async {
   }
 
   Widget _summaryCol(String label, String value, Color color) => Column(
-        children: [
-          Text(label,
-              style: TextStyle(
-                  color: color.withOpacity(0.8), fontSize: 12)),
-          const SizedBox(height: 4),
-          Text(value,
-              style: TextStyle(
-                  fontWeight: FontWeight.w800, fontSize: 16, color: color)),
-        ],
-      );
+    children: [
+      Text(
+        label,
+        style: TextStyle(color: color.withOpacity(0.8), fontSize: 12),
+      ),
+      const SizedBox(height: 4),
+      Text(
+        value,
+        style: TextStyle(
+          fontWeight: FontWeight.w800,
+          fontSize: 16,
+          color: color,
+        ),
+      ),
+    ],
+  );
 
   Widget _memberCard(
     MessMember member,
@@ -398,16 +458,19 @@ Future<void> _manageMembers() async {
     }
 
     final label = member.displayName;
-                return Padding(
+    return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: AppCard(
         onTap: () {
-          Navigator.of(context).push(MaterialPageRoute(
-            builder: (_) => MemberDetailScreen(
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => MemberDetailScreen(
                 name: member.displayName,
                 email: member.email,
-                month: month),
-          ));
+                month: month,
+              ),
+            ),
+          );
         },
         child: Row(
           children: [
@@ -436,8 +499,7 @@ Future<void> _manageMembers() async {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(label,
-                      style: Theme.of(context).textTheme.titleMedium),
+                  Text(label, style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 4),
                   Text(
                     overpaid > 0
@@ -454,9 +516,13 @@ Future<void> _manageMembers() async {
                 AppBadge(label: status, color: color),
                 if (remaining > 0) ...[
                   const SizedBox(height: 4),
-                  Text('${money.format(remaining)} left',
-                      style: const TextStyle(
-                          fontSize: 12, color: AppTheme.textSecondary)),
+                  Text(
+                    '${money.format(remaining)} left',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppTheme.textSecondary,
+                    ),
+                  ),
                 ],
               ],
             ),

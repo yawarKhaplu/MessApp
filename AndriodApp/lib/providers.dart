@@ -1,4 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'data/models.dart';
@@ -16,8 +15,9 @@ import 'services/notifications.dart';
 
 final repositoryProvider = Provider<MessRepository>((ref) => MessRepository());
 
-final notificationServiceProvider =
-    Provider<NotificationService>((ref) => NotificationService.instance);
+final notificationServiceProvider = Provider<NotificationService>(
+  (ref) => NotificationService.instance,
+);
 
 /// Google sign-in. Identity only for now: no expense data leaves the device.
 /// Shared data is a separate step, so this establishes WHO, not WHAT.
@@ -62,7 +62,8 @@ final messMembersProvider = Provider<List<MessMember>>((ref) {
 /// Derived from the roster, so every member computes the same answer from the
 /// same document and no one has to be told.
 final messTurnProvider = Provider<MessTurn>((ref) {
-  return ref.watch(activeMessProvider).valueOrNull?.turn ?? const MessTurn.empty();
+  return ref.watch(activeMessProvider).valueOrNull?.turn ??
+      const MessTurn.empty();
 });
 
 /// Role of the signed-in person in the open mess, or null when no mess is
@@ -95,7 +96,9 @@ class SettingsNotifier extends AsyncNotifier<AppSettings> {
 
   Future<void> updateSettings(AppSettings settings) async {
     await ref.read(repositoryProvider).updateSettings(settings);
-    await ref.read(notificationServiceProvider).applySettings(
+    await ref
+        .read(notificationServiceProvider)
+        .applySettings(
           enabled: settings.reminderEnabled,
           timeHHmm: settings.reminderTime,
         );
@@ -103,8 +106,9 @@ class SettingsNotifier extends AsyncNotifier<AppSettings> {
   }
 }
 
-final settingsProvider =
-    AsyncNotifierProvider<SettingsNotifier, AppSettings>(SettingsNotifier.new);
+final settingsProvider = AsyncNotifierProvider<SettingsNotifier, AppSettings>(
+  SettingsNotifier.new,
+);
 
 // ---------- Menus ----------
 
@@ -117,8 +121,7 @@ class MenusNotifier extends AsyncNotifier<MenuCatalogue> {
   MessCloudService get _cloud => ref.read(messCloudServiceProvider);
 
   /// The open mess. Menus belong to it, so there is nothing to show without one.
-  String get _messId =>
-      ref.read(activeMessProvider).valueOrNull?.id ?? '';
+  String get _messId => ref.read(activeMessProvider).valueOrNull?.id ?? '';
 
   @override
   Future<MenuCatalogue> build() async {
@@ -143,13 +146,20 @@ class MenusNotifier extends AsyncNotifier<MenuCatalogue> {
 
   Future<void> rename(String menuId, String name) async {
     await _cloud.renameMenu(
-        _messId, state.valueOrNull?.menus ?? const [], menuId, name);
+      _messId,
+      state.valueOrNull?.menus ?? const [],
+      menuId,
+      name,
+    );
     await _reload();
   }
 
   Future<void> delete(String menuId) async {
     await _cloud.deleteMenu(
-        _messId, state.valueOrNull?.menus ?? const [], menuId);
+      _messId,
+      state.valueOrNull?.menus ?? const [],
+      menuId,
+    );
     await _reload();
   }
 
@@ -164,8 +174,12 @@ class MenusNotifier extends AsyncNotifier<MenuCatalogue> {
     await _reload();
   }
 
-  Future<void> updateItem(String menuId, String itemId, String name,
-      double price) async {
+  Future<void> updateItem(
+    String menuId,
+    String itemId,
+    String name,
+    double price,
+  ) async {
     await _cloud.updateMenuItem(
       _messId,
       state.valueOrNull?.menus ?? const [],
@@ -179,19 +193,28 @@ class MenusNotifier extends AsyncNotifier<MenuCatalogue> {
 
   Future<void> deleteItem(String menuId, String itemId) async {
     await _cloud.deleteMenuItem(
-        _messId, state.valueOrNull?.menus ?? const [], menuId, itemId);
+      _messId,
+      state.valueOrNull?.menus ?? const [],
+      menuId,
+      itemId,
+    );
     await _reload();
   }
 
   Future<void> reorderItems(String menuId, List<String> itemIds) async {
     await _cloud.reorderMenuItems(
-        _messId, state.valueOrNull?.menus ?? const [], menuId, itemIds);
+      _messId,
+      state.valueOrNull?.menus ?? const [],
+      menuId,
+      itemIds,
+    );
     await _reload();
   }
 }
 
-final menusProvider =
-    AsyncNotifierProvider<MenusNotifier, MenuCatalogue>(MenusNotifier.new);
+final menusProvider = AsyncNotifierProvider<MenusNotifier, MenuCatalogue>(
+  MenusNotifier.new,
+);
 
 /// Item count per menu, derived from the catalogue already in memory.
 final menuItemCountsProvider = Provider<Map<String, int>>((ref) {
@@ -205,17 +228,16 @@ final menuItemCountsProvider = Provider<Map<String, int>>((ref) {
 /// Keyed by member email so this lines up with the shared roster. Re-read when
 /// the month or the mess changes; anything that writes a payment invalidates it,
 /// so both people always see the same figures.
-final sharedCollectionsProvider =
-    FutureProvider.autoDispose.family<Map<String, MemberCollection>, String>(
-        (ref, month) async {
-  // Watched so a new member or a removed one is reflected immediately.
-  final mess = await ref.watch(activeMessProvider.future);
-  if (mess == null) return const {};
+final sharedCollectionsProvider = FutureProvider.autoDispose
+    .family<Map<String, MemberCollection>, String>((ref, month) async {
+      // Watched so a new member or a removed one is reflected immediately.
+      final mess = await ref.watch(activeMessProvider.future);
+      if (mess == null) return const {};
 
-  return ref
-      .read(messCloudServiceProvider)
-      .collectionsFor(mess.id, month, mess.members);
-});
+      return ref
+          .read(messCloudServiceProvider)
+          .collectionsFor(mess.id, month, mess.members);
+    });
 
 /// Who may change collection figures. Read from the membership document, never
 /// assumed from the UI.
@@ -249,37 +271,18 @@ final canRecordTodaysCookProvider = Provider<bool>((ref) {
 ///
 /// Invalidated whenever anything is written, so the owner who records a meal and
 /// the member reading it see the same figures without pulling to refresh.
-final sharedExpensesProvider =
-    FutureProvider.autoDispose.family<List<CloudExpense>, String>((ref, month) async {
-  final mess = await ref.watch(activeMessProvider.future);
-  if (mess == null) return const [];
+final sharedExpensesProvider = FutureProvider.autoDispose
+    .family<List<CloudExpense>, String>((ref, month) async {
+      final mess = await ref.watch(activeMessProvider.future);
+      if (mess == null) return const [];
 
-  for (var attempt = 0; attempt < 4; attempt++) {
-    try {
-      return await ref.read(messCloudServiceProvider).expenses(mess.id, month);
-    } on FirebaseException catch (e) {
-      if (e.code != 'unavailable' || attempt == 3) rethrow;
-      // Transient service state: back off and retry before surfacing it.
-      await Future.delayed(Duration(seconds: (1 << attempt)));
-    }
-  }
-  return const [];
-});
+      return ref.read(messCloudServiceProvider).expenses(mess.id, month);
+    });
 
 // ---------- Reports ----------
 
-/// ...
-Future<ReportBundle> _loadReportBundle(String messId, MessCloudService service) async {
-  for (var attempt = 0; attempt < 4; attempt++) {
-    try {
-      return await service.reportBundle(messId);
-    } on FirebaseException catch (e) {
-      if (e.code != 'unavailable' || attempt == 3) rethrow;
-      await Future.delayed(Duration(seconds: (1 << attempt)));
-    }
-  }
-  return const ReportBundle.empty();
-}
+// Each underlying read retries independently. Do not multiply retries by
+// restarting the whole report after a single read fails.
 
 /// Today's entries, newest first.
 final todayExpensesProvider = Provider<List<CloudExpense>>((ref) {
@@ -287,9 +290,8 @@ final todayExpensesProvider = Provider<List<CloudExpense>>((ref) {
   // the whole month here would make every "today" figure in the app a month
   // figure, and the name would be lying about it.
   final today = dayKey(DateTime.now());
-  final monthEntries = ref
-          .watch(sharedExpensesProvider(monthKey(DateTime.now())))
-          .valueOrNull ??
+  final monthEntries =
+      ref.watch(sharedExpensesProvider(monthKey(DateTime.now()))).valueOrNull ??
       const <CloudExpense>[];
 
   return monthEntries.where((e) => e.date == today).toList();
@@ -300,8 +302,8 @@ final todayExpenseTotalProvider = Provider<double>((ref) {
   // A day, not a month: comparing against a month key would sum the whole month
   // and report it as today's spending.
   final today = dayKey(DateTime.now());
-  final all = ref.watch(sharedExpensesProvider(monthKey(DateTime.now())))
-      .valueOrNull ??
+  final all =
+      ref.watch(sharedExpensesProvider(monthKey(DateTime.now()))).valueOrNull ??
       const <CloudExpense>[];
   return totalBetween(all, today, today).total;
 });
@@ -345,13 +347,16 @@ Future<String> saveExpense({
       RecordRefusal.notSignedIn => 'Sign in again to record a meal.',
       RecordRefusal.notTheirCook =>
         'You can only record a meal for your own cooking turn.',
-      RecordRefusal.notTheirTurn => cook == null
-          ? 'It is not your turn today.'
-          : 'It is not your turn today — $cook is cooking.',
+      RecordRefusal.notTheirTurn =>
+        cook == null
+            ? 'It is not your turn today.'
+            : 'It is not your turn today — $cook is cooking.',
     });
   }
 
-  final id = await ref.read(messCloudServiceProvider).addExpense(
+  final id = await ref
+      .read(messCloudServiceProvider)
+      .addExpense(
         messId: mess.id,
         date: date,
         menuName: menuName,
@@ -380,11 +385,13 @@ Future<String> saveExpense({
 /// aggregate under these rules, so the grouping happens in Dart. Every tab works
 /// from the same bundle, which is what stops the daily list, the trend and the
 /// month forecast disagreeing about the same day.
-final reportBundleProvider = FutureProvider.autoDispose<ReportBundle>((ref) async {
+final reportBundleProvider = FutureProvider.autoDispose<ReportBundle>((
+  ref,
+) async {
   final mess = await ref.watch(activeMessProvider.future);
   if (mess == null) return const ReportBundle.empty();
 
-  return _loadReportBundle(mess.id, ref.read(messCloudServiceProvider));
+  return ref.read(messCloudServiceProvider).reportBundle(mess.id);
 });
 
 // ---------- Other expenses (shared) ----------
@@ -394,21 +401,19 @@ final reportBundleProvider = FutureProvider.autoDispose<ReportBundle>((ref) asyn
 /// Owner-only writes, so every member reads the whole month and the same list is
 /// returned for all of them. Invalidated on any write so the owner who records
 /// one sees it without pulling to refresh.
-final otherExpensesProvider =
-    FutureProvider.autoDispose.family<List<CloudOtherExpense>, String>(
-        (ref, month) async {
-  final mess = await ref.watch(activeMessProvider.future);
-  if (mess == null) return const [];
-  return ref.read(messCloudServiceProvider).otherExpenses(mess.id, month);
-});
+final otherExpensesProvider = FutureProvider.autoDispose
+    .family<List<CloudOtherExpense>, String>((ref, month) async {
+      final mess = await ref.watch(activeMessProvider.future);
+      if (mess == null) return const [];
+      return ref.read(messCloudServiceProvider).otherExpenses(mess.id, month);
+    });
 
 /// Other expense categories with their allowances, from the mess document.
-final otherCategoriesProvider =
-    FutureProvider.autoDispose.family<List<CloudOtherCategory>, String>(
-        (ref, messId) async {
-  if (messId.isEmpty) return const [];
-  return ref.read(messCloudServiceProvider).otherCategories(messId);
-});
+final otherCategoriesProvider = FutureProvider.autoDispose
+    .family<List<CloudOtherCategory>, String>((ref, messId) async {
+      if (messId.isEmpty) return const [];
+      return ref.read(messCloudServiceProvider).otherCategories(messId);
+    });
 
 /// Categories with what has been spent against each one this month.
 ///
@@ -416,27 +421,26 @@ final otherCategoriesProvider =
 /// running total, so the figure can never drift away from the records it came
 /// from — a category that looks unspent while the entries say otherwise would
 /// quietly overstate what is left.
-final categoryBudgetsProvider =
-    FutureProvider.autoDispose.family<List<CloudCategoryBudget>, DateTime>(
-        (ref, month) async {
-  final mess = await ref.watch(activeMessProvider.future);
-  if (mess == null) return const [];
+final categoryBudgetsProvider = FutureProvider.autoDispose
+    .family<List<CloudCategoryBudget>, DateTime>((ref, month) async {
+      final mess = await ref.watch(activeMessProvider.future);
+      if (mess == null) return const [];
 
-  final key = monthKey(month);
-  final bounds = monthBounds(key);
-  final service = ref.read(messCloudServiceProvider);
+      final key = monthKey(month);
+      final bounds = monthBounds(key);
+      final service = ref.read(messCloudServiceProvider);
 
-  final categories = await service.otherCategories(mess.id);
-  final expenses = await service.otherExpenses(mess.id, key);
+      final categories = await service.otherCategories(mess.id);
+      final expenses = await service.otherExpenses(mess.id, key);
 
-  return [
-    for (final c in categories)
-      CloudCategoryBudget(
-        c,
-        spentInCategory(expenses, c.name, bounds.from, bounds.to),
-      ),
-  ];
-});
+      return [
+        for (final c in categories)
+          CloudCategoryBudget(
+            c,
+            spentInCategory(expenses, c.name, bounds.from, bounds.to),
+          ),
+      ];
+    });
 
 /// Records or updates an other expense. Owner only.
 Future<void> saveOtherExpense({
@@ -459,7 +463,9 @@ Future<void> saveOtherExpense({
     throw const CloudMessage('Only the owner can add other expenses.');
   }
 
-  await ref.read(messCloudServiceProvider).addOtherExpense(
+  await ref
+      .read(messCloudServiceProvider)
+      .addOtherExpense(
         messId: mess.id,
         date: date,
         category: category,
@@ -534,8 +540,9 @@ class MembersNotifier extends AsyncNotifier<List<Member>> {
   }
 }
 
-final membersProvider =
-    AsyncNotifierProvider<MembersNotifier, List<Member>>(MembersNotifier.new);
+final membersProvider = AsyncNotifierProvider<MembersNotifier, List<Member>>(
+  MembersNotifier.new,
+);
 
 // ---------- Wallet & today ----------
 
@@ -553,10 +560,10 @@ final todaySpendProvider = Provider<double>((ref) {
 ///
 /// The fixed rate comes from device settings, which stay local deliberately — a
 /// reminder time or a currency is not something the whole mess should see.
-final todayBudgetProvider =
-    FutureProvider.autoDispose<TodayBudget>((ref) async {
-  final bundle =
-      await ref.watch(reportBundleProvider.future);
+final todayBudgetProvider = FutureProvider.autoDispose<TodayBudget>((
+  ref,
+) async {
+  final bundle = await ref.watch(reportBundleProvider.future);
   final settings = await ref.read(repositoryProvider).getSettings();
 
   return bundle.todayBudget(
@@ -600,27 +607,29 @@ Future<void> refreshTotals(WidgetRef ref) async {
 
 /// Currently selected month (first day of the month).
 final selectedMonthProvider = StateProvider<DateTime>(
-    (ref) => DateTime(DateTime.now().year, DateTime.now().month));
+  (ref) => DateTime(DateTime.now().year, DateTime.now().month),
+);
 
 final monthCollectionsProvider =
     FutureProvider.autoDispose<List<Map<String, Object?>>>((ref) async {
-  final month = ref.watch(selectedMonthProvider);
-  final key = monthKey(month);
-  return ref.read(repositoryProvider).getMonthCollections(key);
-});
+      final month = ref.watch(selectedMonthProvider);
+      final key = monthKey(month);
+      return ref.read(repositoryProvider).getMonthCollections(key);
+    });
 
 // ---------- Reports ----------
 
 /// Report range: [from, to] inclusive.
-final reportRangeProvider = StateProvider<({DateTime from, DateTime to})>(
-  (ref) {
-    final now = DateTime.now();
-    return (from: DateTime(now.year, now.month, 1), to: now);
-  },
-);
+final reportRangeProvider = StateProvider<({DateTime from, DateTime to})>((
+  ref,
+) {
+  final now = DateTime.now();
+  return (from: DateTime(now.year, now.month, 1), to: now);
+});
 
-final dailyTotalsProvider =
-    FutureProvider.autoDispose<List<DayRow>>((ref) async {
+final dailyTotalsProvider = FutureProvider.autoDispose<List<DayRow>>((
+  ref,
+) async {
   final range = ref.watch(reportRangeProvider);
   final bundle = await ref.watch(reportBundleProvider.future);
   return bundle.dailyTotals(dayKey(range.from), dayKey(range.to));
@@ -631,42 +640,44 @@ final dailyTotalsProvider =
 /// Shaped as the existing [MonthOutlook] so the card does not have to be
 /// rewritten; the figures behind it now come from Firestore rather than SQLite,
 /// which is the part that mattered.
-final monthOutlookProvider =
-    FutureProvider.autoDispose.family<MonthOutlook, DateTime>((ref, month) async {
-  final bundle = await ref.watch(reportBundleProvider.future);
-  final f = bundle.monthFigures(monthKey(month), DateTime.now());
+final monthOutlookProvider = FutureProvider.autoDispose
+    .family<MonthOutlook, DateTime>((ref, month) async {
+      final bundle = await ref.watch(reportBundleProvider.future);
+      final f = bundle.monthFigures(monthKey(month), DateTime.now());
 
-  return MonthOutlook(
-    // The card holds the month as a DateTime on the first of the month, while the
-    // bundle keys it as text. Parsed back so the card needs no rewrite; the month
-    // is only ever used as a label and a key here, never as a day.
-    month: DateTime.parse('${f.month}-01'),
-    target: f.target,
-    collected: f.collected,
-    spent: f.spent,
-    daysElapsed: f.daysElapsed,
-    daysRemaining: f.daysRemaining,
-    daysInMonth: f.daysInMonth,
-    memberCount: f.memberCount,
-    committed: f.committed,
-    projectedAtFixedRate: f.projectedAtFixedRate,
-    foodSpent: f.foodSpent,
-    otherSpent: f.otherSpent,
-    expectedOther: f.expectedOther,
-    stillDue: f.collections.stillDue,
-    credit: f.collections.credit,
-  );
-});
+      return MonthOutlook(
+        // The card holds the month as a DateTime on the first of the month, while the
+        // bundle keys it as text. Parsed back so the card needs no rewrite; the month
+        // is only ever used as a label and a key here, never as a day.
+        month: DateTime.parse('${f.month}-01'),
+        target: f.target,
+        collected: f.collected,
+        spent: f.spent,
+        daysElapsed: f.daysElapsed,
+        daysRemaining: f.daysRemaining,
+        daysInMonth: f.daysInMonth,
+        memberCount: f.memberCount,
+        committed: f.committed,
+        projectedAtFixedRate: f.projectedAtFixedRate,
+        foodSpent: f.foodSpent,
+        otherSpent: f.otherSpent,
+        expectedOther: f.expectedOther,
+        stillDue: f.collections.stillDue,
+        credit: f.collections.credit,
+      );
+    });
 
-final menuWiseProvider =
-    FutureProvider.autoDispose<List<ReportRow>>((ref) async {
+final menuWiseProvider = FutureProvider.autoDispose<List<ReportRow>>((
+  ref,
+) async {
   final range = ref.watch(reportRangeProvider);
   final bundle = await ref.watch(reportBundleProvider.future);
   return bundle.byMenu(dayKey(range.from), dayKey(range.to));
 });
 
-final itemWiseProvider =
-    FutureProvider.autoDispose<List<ReportRow>>((ref) async {
+final itemWiseProvider = FutureProvider.autoDispose<List<ReportRow>>((
+  ref,
+) async {
   final range = ref.watch(reportRangeProvider);
   final bundle = await ref.watch(reportBundleProvider.future);
   return bundle.byItem(dayKey(range.from), dayKey(range.to));

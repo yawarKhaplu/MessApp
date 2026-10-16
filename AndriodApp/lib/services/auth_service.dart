@@ -1,6 +1,8 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
+import 'cloud_diagnostics.dart';
+
 /// The signed-in person, reduced to what the app actually needs.
 class AppUser {
   final String uid;
@@ -16,11 +18,11 @@ class AppUser {
   });
 
   factory AppUser.fromFirebase(User user) => AppUser(
-        uid: user.uid,
-        email: user.email ?? '',
-        displayName: user.displayName,
-        photoUrl: user.photoURL,
-      );
+    uid: user.uid,
+    email: user.email ?? '',
+    displayName: user.displayName,
+    photoUrl: user.photoURL,
+  );
 }
 
 /// Why a sign-in attempt failed, in terms the UI can explain.
@@ -48,16 +50,16 @@ class AuthException implements Exception {
   const AuthException(this.failure, [this.detail]);
 
   String get message => switch (failure) {
-        AuthFailure.network =>
-          'Could not reach the internet. Check your connection and try again.',
-        AuthFailure.cancelled => 'Sign-in cancelled.',
-        AuthFailure.noGoogleAccount =>
-          'No Google account found on this phone. Add one in Settings first.',
-        AuthFailure.configuration =>
-          'Sign-in is not configured correctly yet. This is a setup problem, '
-              'not something you did wrong.',
-        AuthFailure.unknown => 'Sign-in failed. Please try again.',
-      };
+    AuthFailure.network =>
+      'Could not reach the internet. Check your connection and try again.',
+    AuthFailure.cancelled => 'Sign-in cancelled.',
+    AuthFailure.noGoogleAccount =>
+      'No Google account found on this phone. Add one in Settings first.',
+    AuthFailure.configuration =>
+      'Sign-in is not configured correctly yet. This is a setup problem, '
+          'not something you did wrong.',
+    AuthFailure.unknown => 'Sign-in failed. Please try again.',
+  };
 
   @override
   String toString() => 'AuthException($failure, $detail)';
@@ -81,8 +83,8 @@ class AuthService {
   }
 
   Stream<AppUser?> get authStateChanges => _auth.authStateChanges().map(
-        (u) => u == null ? null : AppUser.fromFirebase(u),
-      );
+    (u) => u == null ? null : AppUser.fromFirebase(u),
+  );
 
   Future<AppUser> signInWithGoogle() async {
     // v7 exposes a singleton rather than a constructor.
@@ -91,26 +93,37 @@ class AuthService {
     try {
       // Reads this app's configuration out of google-services.json. Must run
       // before authenticate().
-      await signIn.initialize();
+      await diagnoseCloudOperation(
+        'google.initialize',
+        () => signIn.initialize(),
+      );
     } catch (e) {
       throw AuthException(AuthFailure.configuration, e.toString());
     }
 
     try {
-      final account = await signIn.authenticate();
+      final account = await diagnoseCloudOperation(
+        'google.authenticate',
+        () => signIn.authenticate(),
+      );
 
       // Every later step keys off the email: it is the allow-list lookup and
       // the document ID. A Google account without one cannot be identified, so
       // refuse it here rather than failing later with an unreadable error.
       if (account.email.trim().isEmpty) {
-        throw const AuthException(AuthFailure.noGoogleAccount,
-            'The selected Google account has no email address.');
+        throw const AuthException(
+          AuthFailure.noGoogleAccount,
+          'The selected Google account has no email address.',
+        );
       }
 
       final credential = GoogleAuthProvider.credential(
         idToken: account.authentication.idToken,
       );
-      final result = await _auth.signInWithCredential(credential);
+      final result = await diagnoseCloudOperation(
+        'firebase.signInWithCredential',
+        () => _auth.signInWithCredential(credential),
+      );
       final user = result.user;
 
       if (user == null) throw const AuthException(AuthFailure.unknown);
@@ -127,12 +140,12 @@ class AuthService {
   }
 
   /// Signs out, guaranteeing the Firebase session ends.
-///
-/// In google_sign_in v7 the singleton throws if it has not been initialised on
-/// this run. Letting that exception escape would skip the Firebase sign-out
-/// entirely and leave the person apparently still signed in, so each step is
-/// isolated and Firebase is always cleared.
-Future<void> signOut() async {
+  ///
+  /// In google_sign_in v7 the singleton throws if it has not been initialised on
+  /// this run. Letting that exception escape would skip the Firebase sign-out
+  /// entirely and leave the person apparently still signed in, so each step is
+  /// isolated and Firebase is always cleared.
+  Future<void> signOut() async {
     try {
       await GoogleSignIn.instance.signOut();
     } catch (_) {
@@ -142,16 +155,16 @@ Future<void> signOut() async {
   }
 
   AuthFailure _mapGoogleCode(GoogleSignInExceptionCode code) => switch (code) {
-        GoogleSignInExceptionCode.clientConfigurationError ||
-        GoogleSignInExceptionCode.providerConfigurationError =>
-          AuthFailure.configuration,
-        GoogleSignInExceptionCode.canceled => AuthFailure.cancelled,
-        _ => AuthFailure.unknown,
-      };
+    GoogleSignInExceptionCode.clientConfigurationError ||
+    GoogleSignInExceptionCode.providerConfigurationError =>
+      AuthFailure.configuration,
+    GoogleSignInExceptionCode.canceled => AuthFailure.cancelled,
+    _ => AuthFailure.unknown,
+  };
 
   AuthFailure _mapFirebaseCode(String code) => switch (code) {
-        'network-request-failed' => AuthFailure.network,
-        'web-context-canceled' => AuthFailure.cancelled,
-        _ => AuthFailure.unknown,
-      };
+    'network-request-failed' => AuthFailure.network,
+    'web-context-canceled' => AuthFailure.cancelled,
+    _ => AuthFailure.unknown,
+  };
 }

@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Cloud access is needed in release builds as well as debug/profile. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Notification permission (Android 13+) for the daily reminder -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- The reminder is scheduled inexactly, so no exact-alarm permission is

@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import 'collection_cloud_service.dart';
+import 'cloud_diagnostics.dart';
 import 'expense_cloud_service.dart';
 import 'menu_cloud_service.dart';
 import 'other_expense_cloud_service.dart';
@@ -45,7 +46,9 @@ class MessMember {
   /// consistent instead of each one reinventing its own fallback.
   String get displayName {
     final n = (name ?? '').trim();
-    if (n.isNotEmpty && !n.contains('@') && n.toLowerCase() != email.toLowerCase()) {
+    if (n.isNotEmpty &&
+        !n.contains('@') &&
+        n.toLowerCase() != email.toLowerCase()) {
       return n;
     }
     final local = email.split('@').first.trim();
@@ -116,14 +119,14 @@ class MessTurn {
   });
 
   const MessTurn.empty()
-      : order = const [],
-        today = null,
-        next = null,
-        positionInRound = 0,
-        roundLength = 0,
-        anchorDate = null,
-        upcoming = const [],
-        isManual = false;
+    : order = const [],
+      today = null,
+      next = null,
+      positionInRound = 0,
+      roundLength = 0,
+      anchorDate = null,
+      upcoming = const [],
+      isManual = false;
 
   bool get hasMembers => order.isNotEmpty;
 
@@ -149,11 +152,7 @@ class MessTurn {
 /// A distinct value per reason rather than a bare yes/no, because the message
 /// shown is the useful part: telling someone it is not their turn without saying
 /// whose it is leaves them with nothing to do about it.
-enum RecordRefusal {
-  notSignedIn,
-  notTheirTurn,
-  notTheirCook,
-}
+enum RecordRefusal { notSignedIn, notTheirTurn, notTheirCook }
 
 /// Today as `yyyy-MM-dd`, matched against the `date` a meal is filed under.
 ///
@@ -209,12 +208,7 @@ bool mayRecordExpense({
   required String cookEmail,
   required String date,
 }) =>
-    recordRefusal(
-      mess: mess,
-      email: email,
-      cookEmail: cookEmail,
-      date: date,
-    ) ==
+    recordRefusal(mess: mess, email: email, cookEmail: cookEmail, date: date) ==
     null;
 
 /// Who may edit or delete a shared entry.
@@ -358,10 +352,12 @@ class Mess {
     for (final entry in members.entries) {
       final seat = entry.value;
       if (seat is Map) {
-        people.add(MessMember.fromEntry(
-          '${entry.key}',
-          Map<dynamic, dynamic>.from(seat),
-        ));
+        people.add(
+          MessMember.fromEntry(
+            '${entry.key}',
+            Map<dynamic, dynamic>.from(seat),
+          ),
+        );
       }
     }
     // Owner first, then alphabetically. Ascending by role index, since
@@ -497,11 +493,9 @@ class CloudMessage implements Exception {
 /// Expense and collection data still lives in the local SQLite database.
 /// This is the membership layer only, which is what shared access needs first.
 class MessCloudService {
-  MessCloudService({
-    FirebaseFirestore? firestore,
-    FirebaseAuth? auth,
-  })  : _db = firestore ?? FirebaseFirestore.instance,
-        _auth = auth ?? FirebaseAuth.instance;
+  MessCloudService({FirebaseFirestore? firestore, FirebaseAuth? auth})
+    : _db = firestore ?? FirebaseFirestore.instance,
+      _auth = auth ?? FirebaseAuth.instance;
 
   final FirebaseFirestore _db;
   final FirebaseAuth _auth;
@@ -534,8 +528,10 @@ class MessCloudService {
       // Nothing can be looked up without an email, and an empty one would build
       // a malformed path. Treat it as "not approved" rather than crashing.
       // ignore: avoid_print
-      print('MessApp: signed in but no email on the account '
-          '(uid ${_user?.uid}); treating as not approved.');
+      print(
+        'MessApp: signed in but no email on the account '
+        '(uid ${_user?.uid}); treating as not approved.',
+      );
       return false;
     }
     final email = _myEmail!;
@@ -567,7 +563,10 @@ class MessCloudService {
     final email = _myEmail;
     if (email == null) return null;
 
-    final snap = await _db.collection(_memberships).doc(email).get();
+    final snap = await readCloudOperation(
+      'membership.read',
+      () => _db.collection(_memberships).doc(email).get(),
+    );
     final messId = snap.data()?['messId'] as String?;
     if (messId == null || messId.isEmpty) return null;
 
@@ -582,10 +581,16 @@ class MessCloudService {
     final membership = await myMembership();
     if (membership == null) return null;
 
-    final doc = await _db.collection(_messes).doc(membership.messId).get();
+    final doc = await readCloudOperation(
+      'mess.read',
+      () => _db.collection(_messes).doc(membership.messId).get(),
+    );
     if (!doc.exists) return null;
 
-    return Mess.fromDoc(doc, role: membership.role);
+    return diagnoseCloudOperation(
+      'mess.parse',
+      () async => Mess.fromDoc(doc, role: membership.role),
+    );
   }
 
   /// Finds the mess this person should open.
@@ -613,10 +618,7 @@ class MessCloudService {
   /// The mess and the owner's profile are written in one batch, so the
   /// "one account, one mess" rule cannot be half-applied: either both land or
   /// neither does.
-  Future<Mess> createMess({
-    required String name,
-    String? location,
-  }) async {
+  Future<Mess> createMess({required String name, String? location}) async {
     final uid = _user?.uid;
     final email = _myEmail;
     if (uid == null || email == null) {
@@ -624,14 +626,16 @@ class MessCloudService {
     }
     if (!await isApprovedCreator()) {
       throw const CloudMessage(
-          'Your account is not approved to create a mess yet.');
+        'Your account is not approved to create a mess yet.',
+      );
     }
     // Refused here rather than only in the rules, so the person gets a sentence
     // explaining why instead of a bare denial. Being a member counts as
     // belonging to a mess: creating a second would leave them in two.
     if (await hasMembership()) {
       throw const CloudMessage(
-          'You already belong to a mess. One account, one mess.');
+        'You already belong to a mess. One account, one mess.',
+      );
     }
 
     final doc = _db.collection(_messes).doc();
@@ -681,10 +685,7 @@ class MessCloudService {
 
     // Read back rather than rebuilding here, so the caller sees exactly what was
     // stored and the object cannot drift from the database.
-    return Mess.fromDoc(
-      await doc.get(),
-      role: MessRole.owner.wire,
-    );
+    return Mess.fromDoc(await doc.get(), role: MessRole.owner.wire);
   }
 
   // ---- Members ----
@@ -709,20 +710,22 @@ class MessCloudService {
     try {
       final ref = _db.collection(_messes).doc(messId);
       final snap = await ref.get();
-      final existing =
-          Map<dynamic, dynamic>.from((snap.data()?['members'] as Map?) ?? const {});
+      final existing = Map<dynamic, dynamic>.from(
+        (snap.data()?['members'] as Map?) ?? const {},
+      );
 
       if (existing.containsKey(clean)) {
         // Already listed. This is the case for anyone added before membership
         // records existed: they have a seat but no way in, because the app reads
         // the membership document to decide where to send them. Write the missing
         // record instead of refusing, which would leave them stuck permanently.
-        final membership =
-            await _db.collection(_memberships).doc(clean).get();
-        if (membership.exists) {
+        final seat = existing[clean];
+        if (seat is Map && seat['role'] == MessRole.owner.wire) {
           throw const CloudMessage('They are already in this mess.');
         }
-
+        // Membership reads are private to the account itself. Do not read
+        // another person's document here. The owner may idempotently create or
+        // repair a member seat; rules reject changing its mess or role.
         await _db.collection(_memberships).doc(clean).set({
           'email': clean,
           'messId': messId,
@@ -772,8 +775,9 @@ class MessCloudService {
     try {
       final ref = _db.collection(_messes).doc(messId);
       final snap = await ref.get();
-      final seats =
-          Map<dynamic, dynamic>.from((snap.data()?['members'] as Map?) ?? const {});
+      final seats = Map<dynamic, dynamic>.from(
+        (snap.data()?['members'] as Map?) ?? const {},
+      );
       if (!seats.containsKey(clean)) {
         throw const CloudMessage('They are not in this mess.');
       }
@@ -812,9 +816,10 @@ class MessCloudService {
     // somebody who has just been added catch up on the current month instead
     // of seeing a silently partial list. The rules enforce membership rather
     // than this field, so no `where` clause is needed here.
-    final snap = await _db
-        .collection('$_messes/$messId/expenses')
-        .get();
+    final snap = await readCloudOperation(
+      'expenses.read',
+      () => _db.collection('$_messes/$messId/expenses').get(),
+    );
 
     final list = snap.docs
         .map((d) => CloudExpense.fromDoc(d.id, d.data()))
@@ -834,10 +839,7 @@ class MessCloudService {
   ///
   /// [month] is `yyyy-MM`. The day field is `yyyy-MM-dd`, so matching on the
   /// leading seven characters is what puts an entry in its month.
-  Future<List<CloudExpense>> expenses(
-    String messId,
-    String month,
-  ) async {
+  Future<List<CloudExpense>> expenses(String messId, String month) async {
     final all = await _visibleExpenses(messId);
     return all.where((e) => monthOf(e.date) == month).toList();
   }
@@ -946,10 +948,7 @@ class MessCloudService {
     required String expenseId,
   }) async {
     try {
-      await _db
-          .collection('$_messes/$messId/expenses')
-          .doc(expenseId)
-          .delete();
+      await _db.collection('$_messes/$messId/expenses').doc(expenseId).delete();
     } on FirebaseException catch (e) {
       throw CloudMessage(_friendly(e));
     }
@@ -976,19 +975,21 @@ class MessCloudService {
     // report covering a year does not have to guess how far back to look.
     final months = <String>{};
     months.add(monthKeyOf(DateTime.now()));
-    for (final m in await otherExpenseMonths(messId)) {
+    for (final m in await diagnoseCloudOperation(
+      'reports.months',
+      () => otherExpenseMonths(messId),
+    )) {
       months.add(m);
     }
 
     final other = <CloudOtherExpense>[];
     for (final m in months) {
-      try {
-        other.addAll(await otherExpenses(messId, m));
-      } on CloudMessage {
-        // One unreadable month must not blank the whole report; the rest of the
-        // mess's history is still worth showing.
-        continue;
-      }
+      other.addAll(
+        await diagnoseCloudOperation(
+          'reports.otherExpenses',
+          () => otherExpenses(messId, m),
+        ),
+      );
     }
 
     // Every month the mess could plausibly hold collections for, so a report of
@@ -1006,14 +1007,12 @@ class MessCloudService {
       // for this month" cannot be proven against these rules, and the roster is
       // already in hand, so the ids are known without asking.
       for (final member in roster) {
-        try {
-          final c = await collectionFor(messId, member.email, m);
-          // A member with no document yet simply has no share recorded, which is
-          // different from a share of zero and must not be shown as paid.
-          if (c.amountDue > 0 || c.payments.isNotEmpty) collections.add(c);
-        } on CloudMessage {
-          continue;
-        }
+        final c = await diagnoseCloudOperation(
+          'reports.collection',
+          () => collectionFor(messId, member.email, m),
+        );
+        // Missing documents are valid; failed reads must not become zero totals.
+        if (c.amountDue > 0 || c.payments.isNotEmpty) collections.add(c);
       }
     }
 
@@ -1024,10 +1023,16 @@ class MessCloudService {
       // no month filtering is applied here. Filtering by guesses such as "the
       // current month and other-expense months" is what made a year of history
       // disappear from the reports and the spending graph.
-      meals: await _visibleExpenses(messId),
+      meals: await diagnoseCloudOperation(
+        'reports.meals',
+        () => _visibleExpenses(messId),
+      ),
       other: other,
       collections: collections,
-      categories: await otherCategories(messId),
+      categories: await diagnoseCloudOperation(
+        'reports.categories',
+        () => otherCategories(messId),
+      ),
     );
   }
 
@@ -1047,21 +1052,23 @@ class MessCloudService {
     String month,
   ) async {
     try {
-      final doc = await _db
-          .collection('$_messes/$messId/otherExpenses')
-          .doc(month)
-          .get();
+      final doc = await readCloudOperation(
+        'otherExpenses.read',
+        () => _db.collection('$_messes/$messId/otherExpenses').doc(month).get(),
+      );
 
       if (!doc.exists) return const [];
 
       final raw = Map<dynamic, dynamic>.from(
-          (doc.data()?['entries'] as Map?) ?? const {});
+        (doc.data()?['entries'] as Map?) ?? const {},
+      );
 
       final list = <CloudOtherExpense>[];
       for (final e in raw.entries) {
         if (e.value is! Map) continue;
-        final data =
-            Map<String, dynamic>.from(Map<dynamic, dynamic>.from(e.value as Map));
+        final data = Map<String, dynamic>.from(
+          Map<dynamic, dynamic>.from(e.value as Map),
+        );
         list.add(CloudOtherExpense.fromDoc('${e.key}', data));
       }
 
@@ -1070,7 +1077,9 @@ class MessCloudService {
       list.sort((a, b) {
         final byDate = b.date.compareTo(a.date);
         if (byDate != 0) return byDate;
-        return (b.createdAt ?? DateTime(0)).compareTo(a.createdAt ?? DateTime(0));
+        return (b.createdAt ?? DateTime(0)).compareTo(
+          a.createdAt ?? DateTime(0),
+        );
       });
 
       return list;
@@ -1086,7 +1095,10 @@ class MessCloudService {
   /// no way to ask "which months have data" without a query.
   Future<List<String>> otherExpenseMonths(String messId) async {
     try {
-      final doc = await _db.collection(_messes).doc(messId).get();
+      final doc = await readCloudOperation(
+        'otherExpenseMonths.read',
+        () => _db.collection(_messes).doc(messId).get(),
+      );
       final raw = doc.data()?['otherExpenseMonths'];
       if (raw is! List) return const [];
       return [for (final m in raw) '$m'];
@@ -1143,7 +1155,9 @@ class MessCloudService {
       // and then read back as empty. A FieldPath is the only way to add one entry
       // to a map without first reading the whole map.
       await ref.set({'month': month}, SetOptions(merge: true));
-      await ref.update({FieldPath(['entries', key]): entry});
+      await ref.update({
+        FieldPath(['entries', key]): entry,
+      });
 
       await _rememberMonth(messId, month);
       return key;
@@ -1197,9 +1211,13 @@ class MessCloudService {
   /// both and they inherit the owner-only write rule already protecting it.
   Future<List<CloudOtherCategory>> otherCategories(String messId) async {
     try {
-      final doc = await _db.collection(_messes).doc(messId).get();
+      final doc = await readCloudOperation(
+        'otherCategories.read',
+        () => _db.collection(_messes).doc(messId).get(),
+      );
       final raw = Map<dynamic, dynamic>.from(
-          (doc.data()?['otherCategories'] as Map?) ?? const {});
+        (doc.data()?['otherCategories'] as Map?) ?? const {},
+      );
 
       final list = <CloudOtherCategory>[];
       for (final e in raw.entries) {
@@ -1313,11 +1331,10 @@ class MessCloudService {
           // A plain string key here, not a FieldPath: set() takes string keys
           // only. With merge:true the delete sentinel removes the whole map
           // while leaving the month field alone.
-          await _db
-              .collection('$_messes/$messId/otherExpenses')
-              .doc(month)
-              .set({'entries': FieldValue.delete()},
-                  SetOptions(merge: true));
+          await _db.collection('$_messes/$messId/otherExpenses').doc(month).set(
+            {'entries': FieldValue.delete()},
+            SetOptions(merge: true),
+          );
         }
       }
 
@@ -1330,11 +1347,7 @@ class MessCloudService {
   }
 
   /// Rewrites every record filed under [from] so it reads [to].
-  Future<void> _recategorise(
-    String messId,
-    String from,
-    String to,
-  ) async {
+  Future<void> _recategorise(String messId, String from, String to) async {
     final wanted = from.trim().toLowerCase();
 
     for (final month in await otherExpenseMonths(messId)) {
@@ -1343,7 +1356,8 @@ class MessCloudService {
       if (!snap.exists) continue;
 
       final raw = Map<dynamic, dynamic>.from(
-          (snap.data()?['entries'] as Map?) ?? const {});
+        (snap.data()?['entries'] as Map?) ?? const {},
+      );
       if (raw.isEmpty) continue;
 
       final updates = <FieldPath, Object?>{};
@@ -1351,7 +1365,8 @@ class MessCloudService {
         if (e.value is! Map) continue;
 
         final data = Map<String, dynamic>.from(
-            Map<dynamic, dynamic>.from(e.value as Map));
+          Map<dynamic, dynamic>.from(e.value as Map),
+        );
         if ('${data['category']}'.trim().toLowerCase() != wanted) continue;
 
         updates[FieldPath(['entries', '${e.key}', 'category'])] = to;
@@ -1383,16 +1398,19 @@ class MessCloudService {
     if (!doc.exists) return const MenuCatalogue.empty();
 
     final raw = Map<dynamic, dynamic>.from(
-        (doc.data()?['menus'] as Map?) ?? const {});
+      (doc.data()?['menus'] as Map?) ?? const {},
+    );
 
     final list = <CloudMenu>[];
     for (final entry in raw.entries) {
       final value = entry.value;
       if (value is Map) {
-        list.add(CloudMenu.fromEntry(
-          '${entry.key}',
-          Map<dynamic, dynamic>.from(value),
-        ));
+        list.add(
+          CloudMenu.fromEntry(
+            '${entry.key}',
+            Map<dynamic, dynamic>.from(value),
+          ),
+        );
       }
     }
     list.sort(compareMenus);
@@ -1404,10 +1422,7 @@ class MessCloudService {
   ///
   /// Sorted on the way out, so a reorder is stored as the order the user sees
   /// rather than depending on how the list happened to be assembled.
-  Future<void> saveMenus(
-    String messId,
-    List<CloudMenu> menus,
-  ) async {
+  Future<void> saveMenus(String messId, List<CloudMenu> menus) async {
     try {
       await _db.collection(_messes).doc(messId).update({
         'menus': {for (final m in sortMenus(menus)) m.id: m.toEntry()},
@@ -1461,8 +1476,7 @@ class MessCloudService {
     List<CloudMenu> existing,
     String menuId,
   ) async {
-    await saveMenus(
-        messId, existing.where((m) => m.id != menuId).toList());
+    await saveMenus(messId, existing.where((m) => m.id != menuId).toList());
   }
 
   /// Adds an item to a menu.
@@ -1481,16 +1495,18 @@ class MessCloudService {
     await saveMenus(messId, [
       for (final m in existing)
         if (m.id == menuId)
-          m.copyWith(items: [
-            ...m.items,
-            CloudMenuItem(
-              id: newMenuItemId(),
-              name: clean,
-              defaultPrice: defaultPrice,
-              // Placed at the end so a new item never reorders the rest.
-              order: m.items.isEmpty ? 0 : m.items.last.order + 1,
-            ),
-          ])
+          m.copyWith(
+            items: [
+              ...m.items,
+              CloudMenuItem(
+                id: newMenuItemId(),
+                name: clean,
+                defaultPrice: defaultPrice,
+                // Placed at the end so a new item never reorders the rest.
+                order: m.items.isEmpty ? 0 : m.items.last.order + 1,
+              ),
+            ],
+          )
         else
           m,
     ]);
@@ -1512,13 +1528,15 @@ class MessCloudService {
     await saveMenus(messId, [
       for (final m in existing)
         if (m.id == menuId)
-          m.copyWith(items: [
-            for (final i in m.items)
-              if (i.id == itemId)
-                i.copyWith(name: clean, defaultPrice: defaultPrice)
-              else
-                i,
-          ])
+          m.copyWith(
+            items: [
+              for (final i in m.items)
+                if (i.id == itemId)
+                  i.copyWith(name: clean, defaultPrice: defaultPrice)
+                else
+                  i,
+            ],
+          )
         else
           m,
     ]);
@@ -1556,15 +1574,17 @@ class MessCloudService {
     await saveMenus(messId, [
       for (final m in existing)
         if (m.id == menuId)
-          m.copyWith(items: [
-            for (final i in m.items)
-              CloudMenuItem(
-                id: i.id,
-                name: i.name,
-                defaultPrice: i.defaultPrice,
-                order: position[i.id] ?? i.order,
-              ),
-          ])
+          m.copyWith(
+            items: [
+              for (final i in m.items)
+                CloudMenuItem(
+                  id: i.id,
+                  name: i.name,
+                  defaultPrice: i.defaultPrice,
+                  order: position[i.id] ?? i.order,
+                ),
+            ],
+          )
         else
           m,
     ]);
@@ -1600,10 +1620,13 @@ class MessCloudService {
     String email,
     String month,
   ) async {
-    final doc = await _db
-        .collection('$_messes/$messId/collections')
-        .doc(collectionDocId(email, month))
-        .get();
+    final doc = await readCloudOperation(
+      'collection.read',
+      () => _db
+          .collection('$_messes/$messId/collections')
+          .doc(collectionDocId(email, month))
+          .get(),
+    );
 
     if (!doc.exists) {
       return MemberCollection(email: email, month: month, amountDue: 0);
@@ -1615,17 +1638,20 @@ class MessCloudService {
     // literally NAMED "payments.<key>" rather than an entry inside the map, so
     // both shapes are read here. Without this, payments already recorded on that
     // build would stay invisible, which is worse than a duplicate.
-    final raw =
-        Map<dynamic, dynamic>.from((data['payments'] as Map?) ?? const {});
+    final raw = Map<dynamic, dynamic>.from(
+      (data['payments'] as Map?) ?? const {},
+    );
     final payments = <CloudPayment>[];
 
     void addEntry(String id, Map<dynamic, dynamic> p) {
-      payments.add(CloudPayment(
-        id: id,
-        amount: (p['amount'] as num?)?.toDouble() ?? 0,
-        date: DateTime.tryParse('${p['date'] ?? ''}'),
-        recordedBy: p['recordedBy'] as String?,
-      ));
+      payments.add(
+        CloudPayment(
+          id: id,
+          amount: (p['amount'] as num?)?.toDouble() ?? 0,
+          date: DateTime.tryParse('${p['date'] ?? ''}'),
+          recordedBy: p['recordedBy'] as String?,
+        ),
+      );
     }
 
     for (final entry in raw.entries) {
@@ -1635,9 +1661,7 @@ class MessCloudService {
 
     for (final entry in data.entries) {
       final key = entry.key;
-      if (key is String &&
-          key.startsWith('payments.') &&
-          entry.value is Map) {
+      if (key is String && key.startsWith('payments.') && entry.value is Map) {
         addEntry(
           key.substring('payments.'.length),
           Map<dynamic, dynamic>.from(entry.value as Map),
@@ -1675,11 +1699,11 @@ class MessCloudService {
           .collection('$_messes/$messId/collections')
           .doc(collectionDocId(email, month))
           .set({
-        'email': email.trim().toLowerCase(),
-        'month': month,
-        'amountDue': amount,
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+            'email': email.trim().toLowerCase(),
+            'month': month,
+            'amountDue': amount,
+            'updatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
     } on FirebaseException catch (e) {
       throw CloudMessage(_friendly(e));
     }
@@ -1738,13 +1762,13 @@ class MessCloudService {
       }, SetOptions(merge: true));
 
       await ref.update({
-          FieldPath(['payments', '${DateTime.now().microsecondsSinceEpoch}']): {
-            'amount': amount,
-            'date': date,
-            'recordedBy': _myEmail,
-            'at': FieldValue.serverTimestamp(),
-          }
-        });
+        FieldPath(['payments', '${DateTime.now().microsecondsSinceEpoch}']): {
+          'amount': amount,
+          'date': date,
+          'recordedBy': _myEmail,
+          'at': FieldValue.serverTimestamp(),
+        },
+      });
     } on FirebaseException catch (e) {
       throw CloudMessage(_friendly(e));
     }
@@ -1764,7 +1788,9 @@ class MessCloudService {
           // A FieldPath for the same reason as the write: a string key of
           // "payments.<id>" would target a field of that name instead of the
           // entry inside the map.
-          .update({FieldPath(['payments', paymentId]): FieldValue.delete()});
+          .update({
+            FieldPath(['payments', paymentId]): FieldValue.delete(),
+          });
     } on FirebaseException catch (e) {
       throw CloudMessage(_friendly(e));
     }
@@ -1820,16 +1846,16 @@ class MessCloudService {
   String _generateJoinCode() {
     const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     final random = Random.secure();
-    return List.generate(6, (_) => alphabet[random.nextInt(alphabet.length)])
-        .join();
+    return List.generate(
+      6,
+      (_) => alphabet[random.nextInt(alphabet.length)],
+    ).join();
   }
 
   String _friendly(FirebaseException e) {
     if (e.code == 'permission-denied') {
-      // Nearly always means the published rules are older than the app, since
-      // the app never asks for anything a member should not have.
-      return 'MessApp could not read your mess. This usually means the app '
-          'rules need updating in the Firebase console.';
+      return 'Access denied (permission-denied). Check the signed-in account, '
+          'mess membership and published Firestore rules.';
     }
     if (e.code == 'unavailable' || e.code == 'deadline-exceeded') {
       return 'Could not reach the server. Check your connection.';

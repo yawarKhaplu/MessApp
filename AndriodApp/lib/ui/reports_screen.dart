@@ -96,8 +96,7 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen>
             },
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'month', child: Text('Filter by month')),
-              PopupMenuItem(
-                  value: 'range', child: Text('Custom date range')),
+              PopupMenuItem(value: 'range', child: Text('Custom date range')),
             ],
           ),
         ],
@@ -108,12 +107,19 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen>
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Row(
               children: [
-                const Icon(Icons.date_range, size: 18, color: AppTheme.textSecondary),
+                const Icon(
+                  Icons.date_range,
+                  size: 18,
+                  color: AppTheme.textSecondary,
+                ),
                 const SizedBox(width: 8),
-                Text(rangeLabel,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        color: AppTheme.textSecondary)),
+                Text(
+                  rangeLabel,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
               ],
             ),
           ),
@@ -158,133 +164,169 @@ class _WalletTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return ref.watch(reportBundleProvider).when(
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) => const Center(child: CircularProgressIndicator()),
-      data: (bundle) {
-        final collected =
-            bundle.collectedBetween(dayKey(range.from), dayKey(range.to)).collected;
-        final spent =
-            bundle.spentBetween(dayKey(range.from), dayKey(range.to));
-        final balance = collected - spent;
+    return ref
+        .watch(reportBundleProvider)
+        .when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                FilledButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+          data: (bundle) {
+            final collected = bundle
+                .collectedBetween(dayKey(range.from), dayKey(range.to))
+                .collected;
+            final spent = bundle.spentBetween(
+              dayKey(range.from),
+              dayKey(range.to),
+            );
+            final balance = collected - spent;
 
-        return ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            Container(
-              padding: const EdgeInsets.all(28),
-              decoration: BoxDecoration(
-                gradient: balance >= 0
-                    ? const LinearGradient(
-                        colors: [AppTheme.success, Color(0xFF1B5E20)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      )
-                    : const LinearGradient(
-                        colors: [AppTheme.error, Color(0xFFB71C1C)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
+            return ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(28),
+                  decoration: BoxDecoration(
+                    gradient: balance >= 0
+                        ? const LinearGradient(
+                            colors: [AppTheme.success, Color(0xFF1B5E20)],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          )
+                        : const LinearGradient(
+                            colors: [AppTheme.error, Color(0xFFB71C1C)],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                    borderRadius: BorderRadius.circular(24),
+                    boxShadow: [
+                      BoxShadow(
+                        color:
+                            (balance >= 0 ? AppTheme.success : AppTheme.error)
+                                .withOpacity(0.3),
+                        blurRadius: 24,
+                        offset: const Offset(0, 10),
                       ),
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: [
-                  BoxShadow(
-                    color: (balance >= 0 ? AppTheme.success : AppTheme.error)
-                        .withOpacity(0.3),
-                    blurRadius: 24,
-                    offset: const Offset(0, 10),
+                    ],
                   ),
-                ],
-              ),
-              child: Column(
-                children: [
-                  Text('MESS WALLET',
-                      style: TextStyle(
-                        color: Colors.white.withOpacity(0.85),
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                        letterSpacing: 1.2,
-                      )),
-                  const SizedBox(height: 12),
-                  Text(
-                    money.format(balance),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 42,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -1.5,
-                    ),
+                  child: Column(
+                    children: [
+                      Text(
+                        'MESS WALLET',
+                        style: TextStyle(
+                          color: Colors.white.withOpacity(0.85),
+                          fontWeight: FontWeight.w600,
+                          fontSize: 12,
+                          letterSpacing: 1.2,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        money.format(balance),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 42,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -1.5,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        balance >= 0 ? 'Available balance' : 'Overdrawn',
+                        style: TextStyle(
+                          color: Colors.white.withOpacity(0.8),
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    balance >= 0 ? 'Available balance' : 'Overdrawn',
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(0.8),
-                      fontSize: 14,
-                    ),
+                ),
+                const SizedBox(height: 16),
+                AppCard(
+                  child: Column(
+                    children: [
+                      _row(
+                        context,
+                        'Total collected',
+                        money.format(collected),
+                        AppTheme.success,
+                        Icons.payments_outlined,
+                      ),
+                      const Divider(),
+                      _row(
+                        context,
+                        'Total spent',
+                        money.format(spent),
+                        AppTheme.error,
+                        Icons.shopping_cart_outlined,
+                      ),
+                    ],
                   ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            AppCard(
-              child: Column(
-                children: [
-                  _row(context, 'Total collected', money.format(collected),
-                      AppTheme.success, Icons.payments_outlined),
-                  const Divider(),
-                  _row(context, 'Total spent', money.format(spent),
-                      AppTheme.error, Icons.shopping_cart_outlined),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
+                ),
+                const SizedBox(height: 16),
 
-            // Month forecast last: the plain balances come first, the
-            // projection is the thing you read once you have those.
-            MonthOutlookCard(month: range.from),
-          ],
+                // Month forecast last: the plain balances come first, the
+                // projection is the thing you read once you have those.
+                MonthOutlookCard(month: range.from),
+              ],
+            );
+          },
         );
-      },
-    );
   }
 
-  Widget _row(BuildContext context, String label, String value,
-          Color color, IconData icon) =>
-      Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Row(
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: color.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(icon, color: color, size: 20),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(label,
-                  style: Theme.of(context).textTheme.bodyLarge),
-            ),
-            Text(value,
-                style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 16,
-                    color: color)),
-          ],
+  Widget _row(
+    BuildContext context,
+    String label,
+    String value,
+    Color color,
+    IconData icon,
+  ) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 8),
+    child: Row(
+      children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(icon, color: color, size: 20),
         ),
-      );
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(label, style: Theme.of(context).textTheme.bodyLarge),
+        ),
+        Text(
+          value,
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 16,
+            color: color,
+          ),
+        ),
+      ],
+    ),
+  );
 
   Future<Map<String, double>> _walletTotals(
-      WidgetRef ref, DateTime from, DateTime to) async {
-    final bundle =
-        await ref.read(messCloudServiceProvider).reportBundle(ref
-            .read(activeMessProvider)
-            .valueOrNull
-            ?.id ??
-            '');
+    WidgetRef ref,
+    DateTime from,
+    DateTime to,
+  ) async {
+    final bundle = await ref
+        .read(messCloudServiceProvider)
+        .reportBundle(ref.read(activeMessProvider).valueOrNull?.id ?? '');
 
     final t = bundle.collectedBetween(dayKey(from), dayKey(to));
 
@@ -306,7 +348,9 @@ class _DailyTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return ref.watch(reportBundleProvider).when(
+    return ref
+        .watch(reportBundleProvider)
+        .when(
           loading: () => const Center(child: CircularProgressIndicator()),
           error: (e, _) => Center(
             child: Column(
@@ -322,8 +366,10 @@ class _DailyTab extends ConsumerWidget {
             ),
           ),
           data: (bundle) {
-            final days =
-                bundle.dailyTotals(dayKey(range.from), dayKey(range.to));
+            final days = bundle.dailyTotals(
+              dayKey(range.from),
+              dayKey(range.to),
+            );
             if (days.isEmpty) {
               return const Center(child: Text('No expenses in this range.'));
             }
@@ -338,7 +384,8 @@ class _DailyTab extends ConsumerWidget {
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 10),
                   child: AppCard(
-                    onTap: () => _showDayDetail(context, ref, bundle, date, money),
+                    onTap: () =>
+                        _showDayDetail(context, ref, bundle, date, money),
                     child: Row(
                       children: [
                         Container(
@@ -351,15 +398,21 @@ class _DailyTab extends ConsumerWidget {
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Text('${date.day}',
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.w800,
-                                      fontSize: 18,
-                                      color: AppTheme.primary)),
-                              Text(DateFormat('MMM').format(date),
-                                  style: const TextStyle(
-                                      fontSize: 10,
-                                      color: AppTheme.textSecondary)),
+                              Text(
+                                '${date.day}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 18,
+                                  color: AppTheme.primary,
+                                ),
+                              ),
+                              Text(
+                                DateFormat('MMM').format(date),
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  color: AppTheme.textSecondary,
+                                ),
+                              ),
                             ],
                           ),
                         ),
@@ -368,21 +421,26 @@ class _DailyTab extends ConsumerWidget {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(DateFormat.EEEE().format(date),
-                                  style:
-                                      Theme.of(context).textTheme.titleSmall),
+                              Text(
+                                DateFormat.EEEE().format(date),
+                                style: Theme.of(context).textTheme.titleSmall,
+                              ),
                               const SizedBox(height: 2),
-                              Text(DateFormat.yMMMd().format(date),
-                                  style:
-                                      Theme.of(context).textTheme.bodySmall),
+                              Text(
+                                DateFormat.yMMMd().format(date),
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
                             ],
                           ),
                         ),
-                        Text(money.format(total),
-                            style: const TextStyle(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 16,
-                                color: AppTheme.primary)),
+                        Text(
+                          money.format(total),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 16,
+                            color: AppTheme.primary,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -394,11 +452,12 @@ class _DailyTab extends ConsumerWidget {
   }
 
   Future<void> _showDayDetail(
-      BuildContext context,
-      WidgetRef ref,
-      ReportBundle bundle,
-      DateTime day,
-      NumberFormat money) async {
+    BuildContext context,
+    WidgetRef ref,
+    ReportBundle bundle,
+    DateTime day,
+    NumberFormat money,
+  ) async {
     final key = dayKey(day);
     final entries = bundle.dayEntries(key);
     final expenses = entries.meals;
@@ -415,8 +474,10 @@ class _DailyTab extends ConsumerWidget {
           controller: scroll,
           padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
           children: [
-            Text(DateFormat.yMMMEd().format(day),
-                style: Theme.of(context).textTheme.titleLarge),
+            Text(
+              DateFormat.yMMMEd().format(day),
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
             const SizedBox(height: 12),
             for (final e in expenses)
               Padding(
@@ -431,7 +492,10 @@ class _DailyTab extends ConsumerWidget {
                     if (mess != null &&
                         !mayEditExpense(
                           mess: mess,
-                          email: ref.read(currentUserProvider).valueOrNull?.email,
+                          email: ref
+                              .read(currentUserProvider)
+                              .valueOrNull
+                              ?.email,
                           recordedBy: e.recordedBy ?? '',
                           cookEmail: e.cookEmail,
                         )) {
@@ -450,25 +514,38 @@ class _DailyTab extends ConsumerWidget {
                       // The entry may have been moved to another month by the
                       // edit, so both the month it came from and the one it is in
                       // are cleared rather than leaving a stale copy behind.
-                      ref.invalidate(sharedExpensesProvider(monthOf(entry.date)));
                       ref.invalidate(
-                          sharedExpensesProvider(monthOf(monthKey(day))));
+                        sharedExpensesProvider(monthOf(entry.date)),
+                      );
+                      ref.invalidate(
+                        sharedExpensesProvider(monthOf(monthKey(day))),
+                      );
                     }
                   },
                   child: Row(
                     children: [
-                      const Icon(Icons.restaurant_menu_outlined,
-                          color: AppTheme.primary, size: 20),
+                      const Icon(
+                        Icons.restaurant_menu_outlined,
+                        color: AppTheme.primary,
+                        size: 20,
+                      ),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: Text(e.menuName,
-                            style: Theme.of(context).textTheme.titleSmall),
+                        child: Text(
+                          e.menuName,
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
                       ),
-                      Text(money.format(e.total),
-                          style: const TextStyle(fontWeight: FontWeight.w700)),
+                      Text(
+                        money.format(e.total),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
                       const SizedBox(width: 6),
-                      const Icon(Icons.chevron_right,
-                          size: 18, color: AppTheme.textSecondary),
+                      const Icon(
+                        Icons.chevron_right,
+                        size: 18,
+                        color: AppTheme.textSecondary,
+                      ),
                     ],
                   ),
                 ),
@@ -494,18 +571,28 @@ class _DailyTab extends ConsumerWidget {
                   },
                   child: Row(
                     children: [
-                      const Icon(Icons.receipt_outlined,
-                          color: AppTheme.accent, size: 20),
+                      const Icon(
+                        Icons.receipt_outlined,
+                        color: AppTheme.accent,
+                        size: 20,
+                      ),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: Text(o.category,
-                            style: Theme.of(context).textTheme.titleSmall),
+                        child: Text(
+                          o.category,
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
                       ),
-                      Text(money.format(o.amount),
-                          style: const TextStyle(fontWeight: FontWeight.w700)),
+                      Text(
+                        money.format(o.amount),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
                       const SizedBox(width: 4),
-                      const Icon(Icons.edit_outlined,
-                          size: 16, color: AppTheme.textSecondary),
+                      const Icon(
+                        Icons.edit_outlined,
+                        size: 16,
+                        color: AppTheme.textSecondary,
+                      ),
                     ],
                   ),
                 ),
@@ -525,7 +612,9 @@ class _ByMemberTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return ref.watch(reportBundleProvider).when(
+    return ref
+        .watch(reportBundleProvider)
+        .when(
           loading: () => const Center(child: CircularProgressIndicator()),
           error: (e, _) => Center(
             child: Column(
@@ -541,11 +630,11 @@ class _ByMemberTab extends ConsumerWidget {
             ),
           ),
           data: (bundle) {
-            final rows =
-                bundle.byCook(dayKey(range.from), dayKey(range.to));
+            final rows = bundle.byCook(dayKey(range.from), dayKey(range.to));
             if (rows.isEmpty) {
               return const Center(
-                  child: Text('No member-tagged entries in this range.'));
+                child: Text('No member-tagged entries in this range.'),
+              );
             }
 
             final grand = rows.fold<double>(0, (s, r) => s + r.total);
@@ -569,30 +658,35 @@ class _ByMemberTab extends ConsumerWidget {
                         width: 46,
                         height: 46,
                         decoration: BoxDecoration(
-                          color: (unassigned
-                                  ? AppTheme.textSecondary
-                                  : AppTheme.primary)
-                              .withOpacity(0.1),
+                          color:
+                              (unassigned
+                                      ? AppTheme.textSecondary
+                                      : AppTheme.primary)
+                                  .withOpacity(0.1),
                           borderRadius: BorderRadius.circular(13),
                         ),
                         child: Icon(
-                            unassigned ? Icons.person_off : Icons.person,
-                            color: unassigned
-                                ? AppTheme.textSecondary
-                                : AppTheme.primary,
-                            size: 22),
+                          unassigned ? Icons.person_off : Icons.person,
+                          color: unassigned
+                              ? AppTheme.textSecondary
+                              : AppTheme.primary,
+                          size: 22,
+                        ),
                       ),
                       const SizedBox(width: 14),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(name,
-                                style: Theme.of(context).textTheme.titleSmall),
+                            Text(
+                              name,
+                              style: Theme.of(context).textTheme.titleSmall,
+                            ),
                             const SizedBox(height: 2),
                             Text(
-                                '$entries ${entries == 1 ? 'entry' : 'entries'} · ${(share * 100).toStringAsFixed(0)}% of spend',
-                                style: Theme.of(context).textTheme.bodySmall),
+                              '$entries ${entries == 1 ? 'entry' : 'entries'} · ${(share * 100).toStringAsFixed(0)}% of spend',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
                             const SizedBox(height: 8),
                             ClipRRect(
                               borderRadius: BorderRadius.circular(4),
@@ -600,19 +694,24 @@ class _ByMemberTab extends ConsumerWidget {
                                 value: share,
                                 minHeight: 6,
                                 backgroundColor: AppTheme.divider,
-                                valueColor: AlwaysStoppedAnimation(unassigned
-                                    ? AppTheme.textSecondary
-                                    : AppTheme.primary),
+                                valueColor: AlwaysStoppedAnimation(
+                                  unassigned
+                                      ? AppTheme.textSecondary
+                                      : AppTheme.primary,
+                                ),
                               ),
                             ),
                           ],
                         ),
                       ),
                       const SizedBox(width: 12),
-                      Text(money.format(total),
-                          style: const TextStyle(
-                              fontWeight: FontWeight.w800,
-                              color: AppTheme.primary)),
+                      Text(
+                        money.format(total),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          color: AppTheme.primary,
+                        ),
+                      ),
                     ],
                   ),
                 );
@@ -631,7 +730,9 @@ class _MenuWiseTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return ref.watch(reportBundleProvider).when(
+    return ref
+        .watch(reportBundleProvider)
+        .when(
           loading: () => const Center(child: CircularProgressIndicator()),
           error: (e, _) => Center(
             child: Column(
@@ -649,7 +750,9 @@ class _MenuWiseTab extends ConsumerWidget {
           data: (bundle) {
             final rows = bundle.byMenu(dayKey(range.from), dayKey(range.to));
             if (rows.isEmpty) {
-              return const Center(child: Text('No menu expenses in this range.'));
+              return const Center(
+                child: Text('No menu expenses in this range.'),
+              );
             }
 
             final grand = rows.fold<double>(0, (s, r) => s + r.total);
@@ -668,12 +771,17 @@ class _MenuWiseTab extends ConsumerWidget {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text(r.label,
-                              style: Theme.of(context).textTheme.titleMedium),
-                          Text(money.format(total),
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                  color: AppTheme.primary)),
+                          Text(
+                            r.label,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          Text(
+                            money.format(total),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w800,
+                              color: AppTheme.primary,
+                            ),
+                          ),
                         ],
                       ),
                       const SizedBox(height: 10),
@@ -683,13 +791,16 @@ class _MenuWiseTab extends ConsumerWidget {
                           value: share,
                           minHeight: 8,
                           backgroundColor: AppTheme.divider,
-                          valueColor:
-                              const AlwaysStoppedAnimation(AppTheme.primary),
+                          valueColor: const AlwaysStoppedAnimation(
+                            AppTheme.primary,
+                          ),
                         ),
                       ),
                       const SizedBox(height: 6),
-                      Text('${(share * 100).toStringAsFixed(1)}% of spending',
-                          style: Theme.of(context).textTheme.bodySmall),
+                      Text(
+                        '${(share * 100).toStringAsFixed(1)}% of spending',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                     ],
                   ),
                 );
@@ -708,7 +819,9 @@ class _ItemWiseTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return ref.watch(reportBundleProvider).when(
+    return ref
+        .watch(reportBundleProvider)
+        .when(
           loading: () => const Center(child: CircularProgressIndicator()),
           error: (e, _) => Center(
             child: Column(
@@ -726,7 +839,9 @@ class _ItemWiseTab extends ConsumerWidget {
           data: (bundle) {
             final rows = bundle.byItem(dayKey(range.from), dayKey(range.to));
             if (rows.isEmpty) {
-              return const Center(child: Text('No item expenses in this range.'));
+              return const Center(
+                child: Text('No item expenses in this range.'),
+              );
             }
 
             final grand = rows.fold<double>(0, (s, r) => s + r.total);
@@ -745,8 +860,10 @@ class _ItemWiseTab extends ConsumerWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(r.label,
-                                style: Theme.of(context).textTheme.titleSmall),
+                            Text(
+                              r.label,
+                              style: Theme.of(context).textTheme.titleSmall,
+                            ),
                             const SizedBox(height: 6),
                             ClipRRect(
                               borderRadius: BorderRadius.circular(4),
@@ -755,17 +872,21 @@ class _ItemWiseTab extends ConsumerWidget {
                                 minHeight: 6,
                                 backgroundColor: AppTheme.divider,
                                 valueColor: const AlwaysStoppedAnimation(
-                                    AppTheme.secondary),
+                                  AppTheme.secondary,
+                                ),
                               ),
                             ),
                           ],
                         ),
                       ),
                       const SizedBox(width: 16),
-                      Text(money.format(total),
-                          style: const TextStyle(
-                              fontWeight: FontWeight.w800,
-                              color: AppTheme.secondary)),
+                      Text(
+                        money.format(total),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          color: AppTheme.secondary,
+                        ),
+                      ),
                     ],
                   ),
                 );
@@ -785,7 +906,9 @@ class _MembersTab extends ConsumerWidget {
     final month = monthKey(range.from);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return ref.watch(reportBundleProvider).when(
+    return ref
+        .watch(reportBundleProvider)
+        .when(
           loading: () => const Center(child: CircularProgressIndicator()),
           error: (e, _) => Center(
             child: Column(
@@ -812,7 +935,8 @@ class _MembersTab extends ConsumerWidget {
 
             if (rows.isEmpty) {
               return const Center(
-                  child: Text('No collections set for this month yet.'));
+                child: Text('No collections set for this month yet.'),
+              );
             }
 
             rows.sort((a, b) => a.email.compareTo(b.email));
@@ -832,14 +956,18 @@ class _MembersTab extends ConsumerWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(bundle.nameOf(c.email) ?? c.email.split('@').first,
-                          style: Theme.of(context).textTheme.titleMedium),
+                      Text(
+                        bundle.nameOf(c.email) ?? c.email.split('@').first,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
                       const SizedBox(height: 8),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text('Paid ${money.format(paid)}',
-                              style: Theme.of(context).textTheme.bodyMedium),
+                          Text(
+                            'Paid ${money.format(paid)}',
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
                           if (due > 0 && overpaid > 0)
                             Text(
                               '${money.format(overpaid)} extra',

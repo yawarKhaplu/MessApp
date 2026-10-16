@@ -168,7 +168,7 @@ class NotificationService {
   void _matchZoneByOffset() {
     final offset = DateTime.now().timeZoneOffset;
     for (final location in tz.timeZoneDatabase.locations.values) {
-      if (location.currentTimeZone.offset == offset) {
+      if (location.currentTimeZone.offset == offset.inMilliseconds) {
         tz.setLocalLocation(location);
         return;
       }

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'services/notifications.dart';
+import 'services/cloud_diagnostics.dart';
 import 'providers.dart';
 import 'ui/auth/auth_screen.dart';
 import 'ui/home_screen.dart';
@@ -29,7 +30,10 @@ void main() async {
   // android/app/google-services.json through the native plugin, so no generated
   // options file is needed. Deliberately outside try/catch: if it throws the app
   // cannot authenticate, and continuing would only fail confusingly later.
-  await Firebase.initializeApp();
+  await diagnoseCloudOperation(
+    'firebase.initialize',
+    () => Firebase.initializeApp(),
+  );
 
   runApp(const ProviderScope(child: MessApp()));
 }
@@ -79,9 +83,7 @@ class _SplashScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const Scaffold(
-      body: Center(
-        child: CircularProgressIndicator(color: AppTheme.primary),
-      ),
+      body: Center(child: CircularProgressIndicator(color: AppTheme.primary)),
     );
   }
 }
@@ -133,9 +135,8 @@ class _HomeShellState extends ConsumerState<HomeShell> {
     final destination = NotificationService.instance.takePendingDestination();
     if (destination != kDestinationAddEntry || !mounted) return;
 
-    await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const MenuEntryScreen()),
-    );
+    await Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => const MenuEntryScreen()));
   }
 
   /// Prompts once, and only when notifications are actually blocked.

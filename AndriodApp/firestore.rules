@@ -3,7 +3,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     function isSignedIn() {
-      return request.auth != null;
+      return request.auth != null && request.auth.token.email is string;
     }
 
     // Google does not normalise the case of an address, and Firebase hands the
@@ -66,7 +66,7 @@ service cloud.firestore {
         && (isApprovedCreator()
             && request.resource.data.role == 'owner'
             && request.resource.data.messId is string
-            && get(/databases/$(database)/documents/messes/$(request.resource.data.messId)).data.ownerUid
+            && getAfter(/databases/$(database)/documents/messes/$(request.resource.data.messId)).data.ownerUid
                == request.auth.uid)
         || (request.resource.data.role == 'member'
             && request.resource.data.messId is string
@@ -75,8 +75,8 @@ service cloud.firestore {
       // Only an owner may change an existing membership, and never to promote
       // someone: the role and the mess are both immutable.
       allow update: if isOwnerOfMess(resource.data.messId)
-        && resource.data.role == resource.data.role
-        && resource.data.messId == resource.data.messId;
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.messId == resource.data.messId;
 
       allow delete: if isOwnerOfMess(resource.data.messId);
     }
