@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/models.dart';
 import '../providers.dart';
+import '../services/menu_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'menu_entry_screen.dart';
@@ -25,7 +26,7 @@ class _MenusScreenState extends ConsumerState<MenusScreen> {
     }
   }
 
-  Future<void> _renameMenu(int id, String current) async {
+  Future<void> _renameMenu(String id, String current) async {
     final name =
         await _promptName('Rename menu', 'Menu name', initial: current);
     if (name != null && name.trim().isNotEmpty) {
@@ -33,7 +34,7 @@ class _MenusScreenState extends ConsumerState<MenusScreen> {
     }
   }
 
-  Future<void> _deleteMenu(Menu menu) async {
+  Future<void> _deleteMenu(CloudMenu menu) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -50,7 +51,7 @@ class _MenusScreenState extends ConsumerState<MenusScreen> {
       ),
     );
     if (ok == true) {
-      await ref.read(menusProvider.notifier).delete(menu.id!);
+      await ref.read(menusProvider.notifier).delete(menu.id);
     }
   }
 
@@ -69,7 +70,7 @@ class _MenusScreenState extends ConsumerState<MenusScreen> {
   @override
   Widget build(BuildContext context) {
     final menusAsync = ref.watch(menusProvider);
-    final counts = ref.watch(menuItemCountsProvider).valueOrNull ?? const <int, int>{};
+    final counts = ref.watch(menuItemCountsProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -85,7 +86,8 @@ class _MenusScreenState extends ConsumerState<MenusScreen> {
       body: menusAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('Error: $e')),
-        data: (menus) {
+        data: (catalogue) {
+          final menus = catalogue.menus;
           if (menus.isEmpty) {
             return const Center(child: Text('No menus yet. Tap + to add one.'));
           }
@@ -102,7 +104,7 @@ class _MenusScreenState extends ConsumerState<MenusScreen> {
                     await Navigator.of(context).push(MaterialPageRoute(
                       builder: (_) => MenuItemsScreen(menu: menu),
                     ));
-                    ref.invalidate(menuItemCountsProvider);
+                    ref.invalidate(menusProvider);
                   },
                   child: Column(
                     children: [
@@ -168,7 +170,7 @@ class _MenusScreenState extends ConsumerState<MenusScreen> {
                           PopupMenuButton<String>(
                             onSelected: (v) async {
                               if (v == 'rename') {
-                                _renameMenu(menu.id!, menu.name);
+                                _renameMenu(menu.id, menu.name);
                               } else if (v == 'delete') {
                                 _deleteMenu(menu);
                               } else if (v == 'expense') {
@@ -185,7 +187,7 @@ class _MenusScreenState extends ConsumerState<MenusScreen> {
                                         MenuItemsScreen(menu: menu),
                                   ),
                                 );
-                                ref.invalidate(menuItemCountsProvider);
+                                ref.invalidate(menusProvider);
                               }
                             },
                             itemBuilder: (_) => const [

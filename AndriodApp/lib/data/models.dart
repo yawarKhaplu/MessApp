@@ -114,12 +114,25 @@ class Member {
   final int? id;
   final String name;
 
-  const Member({this.id, required this.name});
+  /// The mess roster entry this person corresponds to, when they are a real
+  /// mess member.
+  ///
+  /// The roster itself lives in Firestore. This is only the link back to it, so
+  /// money recorded against someone is never orphaned when the shared roster
+  /// changes. Null for anyone added before the link existed.
+  final String? email;
 
-  Map<String, Object?> toMap() => {'id': id, 'name': name};
+  const Member({this.id, required this.name, this.email});
 
-  factory Member.fromMap(Map<String, Object?> m) =>
-      Member(id: m['id'] as int?, name: m['name'] as String);
+  bool get isLinked => email != null && email!.isNotEmpty;
+
+  Map<String, Object?> toMap() => {'id': id, 'name': name, 'email': email};
+
+  factory Member.fromMap(Map<String, Object?> m) => Member(
+        id: m['id'] as int?,
+        name: m['name'] as String,
+        email: m['email'] as String?,
+      );
 }
 
 /// One member's monthly share for a given month (yyyy-MM).

@@ -60,5 +60,12 @@ _db/
 *.db-wal
 *.db-shm
 
+# Firebase config belongs to one Firebase project. Not a true secret, since
+# access is restricted by package name and signing certificate, but it is
+# environment specific so it stays out of git.
+android/app/google-services.json
+
 # Local scratch
 *.log
+*.hprof
+google-services.json

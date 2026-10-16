@@ -71,18 +71,22 @@ class MessRepository {
 
   /// Items that belong to other menus, so they can be reused instead of
 /// retyped. Returns the name, the menus it appears in and a typical price.
+///
+/// Excludes a menu by name rather than by local id: the menus are shared and
+/// live in Firestore, so there is no local integer to join against. This stays
+/// local only until expenses move across too.
 Future<List<Map<String, Object?>>> getItemSuggestions(
-    int excludeMenuId) async {
+    String excludeMenuName) async {
   return (await _database).rawQuery('''
     SELECT i.item_name AS name,
            GROUP_CONCAT(DISTINCT m.name) AS menus,
            MAX(i.default_price) AS last_price
     FROM menu_items i
     JOIN menus m ON m.id = i.menu_id
-    WHERE i.menu_id != ?
+    WHERE m.name != ? COLLATE NOCASE
     GROUP BY i.item_name COLLATE NOCASE
     ORDER BY i.item_name COLLATE NOCASE
-  ''', [excludeMenuId]);
+  ''', [excludeMenuName]);
 }
 
 Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
@@ -125,9 +129,21 @@ Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
   // ---------- Expenses (menu entries) ----------
 
   /// Saves an expense with its items. Returns the new expense id.
+  /// Local id for a menu, looked up by name.
+///
+/// A bridge, not a design. Menus are shared and keyed by string in Firestore,
+/// while expenses are still local and join on an integer id. Until expenses move
+/// across, the name is the only thing both sides share.
+Future<int?> menuIdNamed(String name) async {
+    final rows = await (await _database)
+        .query('menus', where: 'name = ?', whereArgs: [name], limit: 1);
+    return rows.isEmpty ? null : rows.first['id'] as int?;
+  }
+
+  /// Saves an expense with its items. Returns the new expense id.
   Future<int> addExpense({
     required DateTime date,
-    required int menuId,
+    required int? menuId,
     required List<ExpenseItem> items,
     int? memberId,
   }) async {
@@ -208,18 +224,6 @@ Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
     return rows.map(ExpenseItem.fromMap).toList();
   }
 
-  /// Expenses for a single day, with menu name.
-  Future<List<Map<String, Object?>>> getDayExpenses(DateTime day) async {
-    return (await _database).rawQuery('''
-      SELECT e.id, e.date, e.total, e.menu_id, e.member_id,
-             m.name AS menu_name, mem.name AS member_name
-      FROM expenses e
-      LEFT JOIN menus m ON m.id = e.menu_id
-      LEFT JOIN members mem ON mem.id = e.member_id
-      WHERE e.date = ?
-      ORDER BY e.id DESC
-    ''', [dayKey(day)]);
-  }
 
   /// Cooking-duty rotation for a given day.
   ///
@@ -492,50 +496,6 @@ Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
 
   // ---------- Auto-split from history ----------
 
-  /// Works out how a menu's total was divided between its items last time,
-  /// so a new entry can be filled in by typing just the total.
-  ///
-  /// Prefers the most recent entry for that menu (an exact repeat of what
-  /// worked before); falls back to averaging every past entry, and finally to
-  /// [SplitHints.empty] when nothing has been recorded yet.
-  Future<SplitHints> getSplitHints(int menuId) async {
-    final d = await _database;
-
-    // 1. Most recent entry for this menu -> exact proportions.
-    final latest = await d.rawQuery('''
-      SELECT e.id, e.date FROM expenses e
-      WHERE e.menu_id = ? AND e.total > 0
-      ORDER BY e.date DESC, e.id DESC LIMIT 1
-    ''', [menuId]);
-
-    if (latest.isNotEmpty) {
-      final expenseId = latest.first['id'] as int?;
-      final rows = await d.rawQuery('''
-        SELECT item_name, SUM(price * quantity) AS amount
-        FROM expense_items WHERE expense_id = ?
-        GROUP BY item_name COLLATE NOCASE
-      ''', [expenseId]);
-      final shares = _normalise(rows);
-      if (shares.isNotEmpty) {
-        return SplitHints(
-          shares,
-          DateTime.parse(latest.first['date'] as String),
-          isExact: true,
-        );
-      }
-    }
-
-    // 2. Otherwise average every entry ever made for this menu.
-    final avg = await d.rawQuery('''
-      SELECT i.item_name AS item_name, AVG(i.price * i.quantity) AS amount
-      FROM expense_items i JOIN expenses e ON e.id = i.expense_id
-      WHERE e.menu_id = ?
-      GROUP BY i.item_name COLLATE NOCASE
-    ''', [menuId]);
-    final shares = _normalise(avg);
-    if (shares.isEmpty) return SplitHints.empty;
-    return SplitHints(shares, null);
-  }
 
   /// Turns raw amount rows into fractions of the whole, keyed by lower-cased
   /// item name so they can be matched case-insensitively.
@@ -570,90 +530,6 @@ Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
     ''', [dayKey(from), dayKey(to)]);
   }
 
-  /// Today's budget summary: budget, spent, remaining.
-  ///
-  /// Budget logic:
-  ///  1. If a manual daily budget is set in Settings, use it.
-  ///  2. Otherwise auto-derive: this month's total collection target
-  ///     (sum of member shares) divided by the number of days in the month.
-  ///  3. If no shares are set, fall back to 0 (no budget shown).
-  Future<Map<String, double>> getTodayBudget() async {
-    final now = DateTime.now();
-    final settings = await getSettings();
-
-    final monthStart = dayKey(DateTime(now.year, now.month, 1));
-    final todayKey = dayKey(now);
-    final daysInMonth = DateTime(now.year, now.month + 1, 0).day;
-    // Days AFTER today. On 11 October a 31-day month leaves 20 (the 12th to
-    // the 31st); today is deliberately excluded here and added back when the
-    // frozen daily cap below is worked out.
-    final daysLeft = daysInMonth - now.day;
-
-    // What the mess has committed to collecting this month.
-    final targetRows = await (await _database).rawQuery('''
-      SELECT COALESCE(SUM(amount_due), 0) AS target
-      FROM collections WHERE month = ?
-    ''', [monthKey(now)]);
-    final monthlyTarget =
-        (targetRows.first['target'] as num?)?.toDouble() ?? 0;
-
-    double budget = settings.dailyBudget;
-    if (budget <= 0 && monthlyTarget > 0) {
-      // Auto: monthly target / days in month.
-      budget = monthlyTarget / daysInMonth;
-    }
-
-    // Month to date covers food AND other expenses, because the budget does.
-    final monthRows = await (await _database).rawQuery('''
-      SELECT (SELECT COALESCE(SUM(total),0) FROM expenses
-              WHERE date BETWEEN ? AND ?) +
-             (SELECT COALESCE(SUM(amount),0) FROM other_expenses
-              WHERE date BETWEEN ? AND ?) AS s
-    ''', [monthStart, todayKey, monthStart, todayKey]);
-    final monthSpent = (monthRows.first['s'] as num?)?.toDouble() ?? 0;
-
-    final spent = await getDayTotal(now);
-
-    final basis = monthlyTarget > 0 ? monthlyTarget : budget * daysInMonth;
-    final left = basis - monthSpent;
-
-    // Spend from BEFORE today only.
-    //
-    // Using month-to-date here would let today's own spending lower the bar
-    // that today's spending is then measured against. That is what made the
-    // figure on screen differ from the threshold actually being enforced.
-    final beforeRows = await (await _database).rawQuery('''
-      SELECT (SELECT COALESCE(SUM(total),0) FROM expenses
-              WHERE date >= ? AND date < ?) +
-             (SELECT COALESCE(SUM(amount),0) FROM other_expenses
-              WHERE date >= ? AND date < ?) AS s
-    ''', [monthStart, todayKey, monthStart, todayKey]);
-    final monthSpentBefore =
-        (beforeRows.first['s'] as num?)?.toDouble() ?? 0;
-
-    // Today's share of whatever was left when the day began, spread across
-    // today plus the days that follow it. Frozen for the whole day, so what is
-    // shown is exactly what is enforced.
-    final daysFromDayStart = daysLeft + 1;
-    final capToday = (daysFromDayStart > 0 && basis > monthSpentBefore)
-        ? (basis - monthSpentBefore) / daysFromDayStart
-        : 0.0;
-
-    // Live pace for the month-level cards, which are meant to move.
-    final safe = daysLeft > 0 && left > 0 ? left / daysLeft : 0.0;
-
-    return {
-      'budget': budget,
-      'spent': spent,
-      'remaining': budget - spent,
-      'capToday': capToday,
-      'capLeft': capToday - spent,
-      'safeToSpend': safe,
-      'daysLeft': daysLeft.toDouble(),
-      'hasTarget': basis > 0 ? 1 : 0,
-      'monthLeft': left,
-    };
-  }
 
   // ---------- Other expenses ----------
 
@@ -793,6 +669,69 @@ Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
     return (await _database).insert('members', {'name': name});
   }
 
+  /// Mirrors the shared mess roster into the local members table.
+  ///
+  /// Firestore owns who is in the mess; this table owns the money recorded
+  /// against each person. This is the join between the two: one local row per
+  /// roster member, matched on email so re-running it updates rather than
+  /// duplicates.
+  ///
+  /// Never deletes. Someone removed from the roster keeps their row and their
+  /// payment history, which is what a money record has to do — losing it would
+  /// quietly change what the mess is owed.
+  ///
+  /// A display name is only written when the roster has one, so an existing
+  /// name chosen on this device is not overwritten with an empty string the
+  /// first time somebody is added by email.
+  Future<List<Member>> syncRoster(
+      List<({String email, String? name})> roster) async {
+    final db = await _database;
+    final existing = await db.query('members');
+
+    for (final person in roster) {
+      final email = person.email.trim().toLowerCase();
+      if (email.isEmpty) continue;
+      final incoming = (person.name ?? '').trim();
+
+      final match = existing.where(
+          (row) => (row['email'] as String?)?.toLowerCase() == email);
+
+      if (match.isNotEmpty) {
+        final row = match.first;
+        // Fill a missing name from the roster, but never replace a real one.
+        final current = (row['name'] as String?) ?? '';
+        if (current.trim().isEmpty && incoming.isNotEmpty) {
+          await db.update('members', {'name': incoming},
+              where: 'id = ?', whereArgs: [row['id']]);
+        }
+        continue;
+      }
+
+      // No link yet. Reuse an unlinked row with the same name, so money
+      // already recorded against that name survives them joining the mess
+      // rather than being split across two rows.
+      final unlinked = existing
+          .where((r) => (r['email'] as String? ?? '').isEmpty)
+          .toList();
+      final sameName = unlinked.where((r) =>
+          ((r['name'] as String? ?? '').trim().toLowerCase()) ==
+          incoming.toLowerCase().trim());
+
+      if (sameName.isNotEmpty) {
+        await db.update('members', {'email': email},
+            where: 'id = ?', whereArgs: [sameName.first['id']]);
+        continue;
+      }
+
+      await db.insert('members', {
+        'name': incoming.isEmpty ? person.email : incoming,
+        'email': email,
+      });
+    }
+
+    return getMembers();
+  }
+
   Future<void> renameMember(int id, String name) async {
     await (await _database)
         .update('members', {'name': name}, where: 'id = ?', whereArgs: [id]);
@@ -853,110 +792,8 @@ Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
 
   // ---------- Totals & reports ----------
 
-  /// Wallet = total payments - total menu expenses - total other expenses.
-  Future<double> getWalletBalance() async {
-    final d = await _database;
-    final payments = await d.rawQuery('SELECT COALESCE(SUM(amount),0) AS s FROM payments');
-    final expenses = await d.rawQuery('SELECT COALESCE(SUM(total),0) AS s FROM expenses');
-    final other =
-        await d.rawQuery('SELECT COALESCE(SUM(amount),0) AS s FROM other_expenses');
-    final p = (payments.first['s'] as num?)?.toDouble() ?? 0;
-    final e = (expenses.first['s'] as num?)?.toDouble() ?? 0;
-    final o = (other.first['s'] as num?)?.toDouble() ?? 0;
-    return p - e - o;
-  }
 
-  Future<double> getDayTotal(DateTime day) async {
-    final rows = await (await _database).rawQuery('''
-      SELECT (SELECT COALESCE(SUM(total),0) FROM expenses WHERE date = ?) +
-             (SELECT COALESCE(SUM(amount),0) FROM other_expenses WHERE date = ?) AS s
-    ''', [dayKey(day), dayKey(day)]);
-    return (rows.first['s'] as num?)?.toDouble() ?? 0;
-  }
 
-  /// Where the month is heading: collected vs spent, and the month-end
-  /// projection if spending simply continues at the current average.
-  Future<MonthOutlook> getMonthOutlook(DateTime month) async {
-    final d = await _database;
-    final key = monthKey(month);
-    final first = DateTime(month.year, month.month, 1);
-    final last = DateTime(month.year, month.month + 1, 0);
-    final daysInMonth = last.day;
-    final today = DateTime.now();
-
-    final isCurrent = today.year == month.year && today.month == month.month;
-    final isPast = !isCurrent &&
-        (today.year > month.year ||
-            (today.year == month.year && today.month > month.month));
-    final daysElapsed = isCurrent ? today.day : (isPast ? daysInMonth : 0);
-    final daysRemaining = daysInMonth - daysElapsed;
-
-    // Collection is worked out PER MEMBER and floored at zero, so an
-    // overpayment by one person never reduces what the others still owe.
-    const collectionSql = '''
-      SELECT COALESCE(SUM(due), 0) AS target,
-             COALESCE(SUM(paid), 0) AS collected,
-             COALESCE(SUM(CASE WHEN due > paid THEN due - paid ELSE 0 END), 0)
-               AS still_due,
-             COALESCE(SUM(CASE WHEN paid > due THEN paid - due ELSE 0 END), 0)
-               AS credit
-      FROM (
-        SELECT c.amount_due AS due,
-               COALESCE((SELECT SUM(p.amount) FROM payments p
-                         WHERE p.collection_id = c.id), 0) AS paid
-        FROM collections c
-        WHERE c.month = ?
-      )
-    ''';
-    final collectionRows = await d.rawQuery(collectionSql, [key]);
-    final cr = collectionRows.first;
-    final spentRows = await d.rawQuery('''
-      SELECT (SELECT COALESCE(SUM(total),0) FROM expenses WHERE date BETWEEN ? AND ?) +
-             (SELECT COALESCE(SUM(amount),0) FROM other_expenses WHERE date BETWEEN ? AND ?) AS s
-    ''', [dayKey(first), dayKey(last), dayKey(first), dayKey(last)]);
-    final memberRows =
-        await d.rawQuery('SELECT COUNT(*) AS c FROM members');
-
-    // Allowance that is set but not yet spent still has to be paid out.
-    final spentByCat = await d.rawQuery('''
-      SELECT COALESCE(SUM(o.amount),0) AS s FROM other_expenses o
-      WHERE o.category IN (SELECT name FROM other_categories WHERE monthly_budget > 0)
-        AND o.date BETWEEN ? AND ?
-''', [dayKey(first), dayKey(last)]);
-    final allowanceRows = await d.rawQuery(
-        'SELECT COALESCE(SUM(monthly_budget),0) AS s FROM other_categories WHERE monthly_budget > 0');
-
-    final allowance = (allowanceRows.first['s'] as num?)?.toDouble() ?? 0.0;
-    final used = (spentByCat.first['s'] as num?)?.toDouble() ?? 0.0;
-    final committed = allowance > used ? allowance - used : 0.0;
-
-    // The run-rate is measured across everything. Other expenses are added once
-    // via their allowance, so a single large payment cannot skew the average
-    // for the rest of the month.
-    final foodRows = await d.rawQuery(
-        'SELECT COALESCE(SUM(total),0) AS s FROM expenses WHERE date BETWEEN ? AND ?',
-        [dayKey(first), dayKey(last)]);
-    final otherRows = await d.rawQuery(
-        'SELECT COALESCE(SUM(amount),0) AS s FROM other_expenses WHERE date BETWEEN ? AND ?',
-        [dayKey(first), dayKey(last)]);
-
-    return MonthOutlook(
-      month: month,
-      target: (cr['target'] as num?)?.toDouble() ?? 0.0,
-      collected: (cr['collected'] as num?)?.toDouble() ?? 0.0,
-      stillDue: (cr['still_due'] as num?)?.toDouble() ?? 0.0,
-      credit: (cr['credit'] as num?)?.toDouble() ?? 0.0,
-      spent: (spentRows.first['s'] as num?)?.toDouble() ?? 0.0,
-      foodSpent: (foodRows.first['s'] as num?)?.toDouble() ?? 0.0,
-      otherSpent: (otherRows.first['s'] as num?)?.toDouble() ?? 0.0,
-      daysElapsed: daysElapsed,
-      daysRemaining: daysRemaining,
-      daysInMonth: daysInMonth,
-      memberCount: (memberRows.first['c'] as num?)?.toInt() ?? 0,
-      committed: committed,
-      expectedOther: allowance,
-    );
-  }
 
   Future<double> getTotalCollected({DateTime? from, DateTime? to}) async {
     final d = await _database;
@@ -975,52 +812,9 @@ Future<int> addMenuItem(int menuId, String name, double defaultPrice) async {
     return (rows.first['s'] as num?)?.toDouble() ?? 0;
   }
 
-  /// Daily totals over a range: date -> total (menu + other).
-  Future<List<Map<String, Object?>>> getDailyTotals(DateTime from, DateTime to) async {
-    return (await _database).rawQuery('''
-      SELECT date, SUM(s) AS total FROM (
-        SELECT date, total AS s FROM expenses WHERE date BETWEEN ? AND ?
-        UNION ALL
-        SELECT date, amount AS s FROM other_expenses WHERE date BETWEEN ? AND ?
-      ) GROUP BY date ORDER BY date DESC
-    ''', [dayKey(from), dayKey(to), dayKey(from), dayKey(to)]);
-  }
 
-  /// Daily totals split into menu food and other expenses.
-///
-/// Kept apart on purpose: a single rent payment would otherwise dwarf a whole
-/// month of food and make the daily pattern impossible to read.
-Future<List<Map<String, Object?>>> getDailySplit(DateTime from, DateTime to) async {
-  return (await _database).rawQuery('''
-    SELECT date, SUM(food) AS food, SUM(other) AS other FROM (
-      SELECT date, total AS food, 0 AS other
-        FROM expenses WHERE date BETWEEN ? AND ?
-      UNION ALL
-      SELECT date, 0 AS food, amount AS other
-        FROM other_expenses WHERE date BETWEEN ? AND ?
-    ) GROUP BY date ORDER BY date ASC
-  ''', [dayKey(from), dayKey(to), dayKey(from), dayKey(to)]);
-}
 
-  /// Menu-wise totals over a range.
-  Future<List<Map<String, Object?>>> getMenuWiseTotals(DateTime from, DateTime to) async {
-    return (await _database).rawQuery('''
-      SELECT m.name AS name, COALESCE(SUM(e.total),0) AS total
-      FROM expenses e JOIN menus m ON m.id = e.menu_id
-      WHERE e.date BETWEEN ? AND ?
-      GROUP BY m.id ORDER BY total DESC
-    ''', [dayKey(from), dayKey(to)]);
-  }
 
-  /// Item-wise totals over a range.
-  Future<List<Map<String, Object?>>> getItemWiseTotals(DateTime from, DateTime to) async {
-    return (await _database).rawQuery('''
-      SELECT i.item_name AS name, COALESCE(SUM(i.quantity * i.price),0) AS total
-      FROM expense_items i JOIN expenses e ON e.id = i.expense_id
-      WHERE e.date BETWEEN ? AND ?
-      GROUP BY i.item_name ORDER BY total DESC
-    ''', [dayKey(from), dayKey(to)]);
-  }
 
   // ---------- Settings ----------
 

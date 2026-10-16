@@ -4,6 +4,8 @@ import 'package:intl/intl.dart';
 
 import '../data/models.dart';
 import '../providers.dart';
+import '../services/mess_cloud_service.dart';
+import '../services/other_expense_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'widgets/text_input_dialog.dart';
@@ -23,7 +25,7 @@ class OtherCategoriesScreen extends ConsumerStatefulWidget {
 class _OtherCategoriesScreenState extends ConsumerState<OtherCategoriesScreen> {
   List<String> _categories = [];
   Map<String, int> _usage = {};
-  List<CategoryBudget> _budgets = [];
+  List<CloudCategoryBudget> _budgets = [];
   bool _loading = true;
 
   @override
@@ -33,26 +35,58 @@ class _OtherCategoriesScreenState extends ConsumerState<OtherCategoriesScreen> {
   }
 
   Future<void> _load() async {
-    final repo = ref.read(repositoryProvider);
-    final cats = await repo.getOtherCategories();
-    final budgets = await repo.getCategoryBudgets(
-        ref.read(selectedMonthProvider));
-    final usage = <String, int>{};
-    for (final c in cats) {
-      usage[c] = await repo.getCategoryUsage(c);
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      return;
     }
+
+    final service = ref.read(messCloudServiceProvider);
+    final key = monthKey(ref.read(selectedMonthProvider));
+    final bounds = monthBounds(key);
+
+    final budgets = await service.otherCategories(mess.id);
+    // Read every month that holds records, not just the selected one: a category
+    // deleted here has to be found again on the records wherever they were filed.
+    final months = await service.otherExpenseMonths(mess.id);
+
+    final records = <CloudOtherExpense>[];
+    for (final m in months) {
+      records.addAll(await service.otherExpenses(mess.id, m));
+    }
+
+    // Usage counted against the selected month, matching the allowance shown
+    // beside it. Counting across all months next to a monthly allowance would
+    // read as overspend for anything ever filed under the category.
+    final inMonth = records
+        .where((e) => e.date.compareTo(bounds.from) >= 0 &&
+            e.date.compareTo(bounds.to) <= 0)
+        .toList();
+
+    final usage = <String, int>{};
+    for (final c in budgets) {
+      usage[c.name] = inMonth.where((e) => e.category == c.name).length;
+    }
+
     if (!mounted) return;
     setState(() {
-      _categories = cats;
+      _categories = [for (final c in budgets) c.name];
       _usage = usage;
-      _budgets = budgets;
+      _budgets = [
+        for (final c in budgets)
+          CloudCategoryBudget(
+            c,
+            spentInCategory(inMonth, c.name, bounds.from, bounds.to),
+          ),
+      ];
       _loading = false;
     });
   }
 
-  CategoryBudget? _budgetFor(String name) {
+  CloudCategoryBudget? _budgetFor(String name) {
     for (final b in _budgets) {
-      if (b.category == name) return b;
+      if (b.name == name) return b;
     }
     return null;
   }
@@ -79,7 +113,20 @@ class _OtherCategoriesScreenState extends ConsumerState<OtherCategoriesScreen> {
     final amount = double.tryParse(value.replaceAll(',', '')) ?? 0;
     if (amount < 0) return;
 
-    await ref.read(repositoryProvider).setCategoryBudget(name, amount);
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+
+    try {
+      await ref
+          .read(messCloudServiceProvider)
+          .setCategoryBudget(mess.id, name, amount);
+    } on CloudMessage catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.text)));
+      return;
+    }
+
     await _afterChange();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -111,7 +158,20 @@ class _OtherCategoriesScreenState extends ConsumerState<OtherCategoriesScreen> {
       return;
     }
 
-    await ref.read(repositoryProvider).addOtherCategory(clean);
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+
+    try {
+      await ref
+          .read(messCloudServiceProvider)
+          .addOtherCategory(mess.id, clean);
+    } on CloudMessage catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.text)));
+      return;
+    }
+
     await _afterChange();
     if (!mounted) return;
     ScaffoldMessenger.of(context)
@@ -142,7 +202,22 @@ class _OtherCategoriesScreenState extends ConsumerState<OtherCategoriesScreen> {
     }
 
     final count = _usage[current] ?? 0;
-    await ref.read(repositoryProvider).renameOtherCategory(current, clean);
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+
+    try {
+      await ref.read(messCloudServiceProvider).renameOtherCategory(
+            messId: mess.id,
+            oldName: current,
+            newName: clean,
+          );
+    } on CloudMessage catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.text)));
+      return;
+    }
+
     await _afterChange();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -186,9 +261,22 @@ class _OtherCategoriesScreenState extends ConsumerState<OtherCategoriesScreen> {
     );
     if (choice == null) return;
 
-    await ref
-        .read(repositoryProvider)
-        .deleteOtherCategory(category, keepRecords: choice == 'keep');
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+
+    try {
+      await ref.read(messCloudServiceProvider).deleteOtherCategory(
+            messId: mess.id,
+            name: category,
+            keepRecords: choice == 'keep',
+          );
+    } on CloudMessage catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.text)));
+      return;
+    }
+
     await _afterChange();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -358,7 +446,7 @@ class _OtherCategoriesScreenState extends ConsumerState<OtherCategoriesScreen> {
 }
 /// One category's allowance usage for the month.
 class _BudgetRow extends StatelessWidget {
-  final CategoryBudget b;
+  final CloudCategoryBudget b;
   final NumberFormat money;
 
   const _BudgetRow({required this.b, required this.money});
@@ -411,7 +499,7 @@ class _BudgetRow extends StatelessWidget {
 
 /// Totals across every category that has an allowance.
 class _BudgetSummary extends StatelessWidget {
-  final List<CategoryBudget> budgets;
+  final List<CloudCategoryBudget> budgets;
 
   const _BudgetSummary({required this.budgets});
 

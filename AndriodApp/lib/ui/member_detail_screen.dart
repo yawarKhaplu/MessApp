@@ -4,18 +4,36 @@ import 'package:intl/intl.dart';
 
 import '../data/models.dart';
 import '../providers.dart';
+import '../services/collection_cloud_service.dart';
+import '../services/mess_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'widgets/pick_date.dart';
 import 'widgets/text_input_dialog.dart';
 
-/// Member detail (PRD 6.4): payments history, add payment,
-/// monthly share for the selected month.
+/// Member detail (PRD 6.4): payments history, add payment, monthly share.
+///
+/// Read-only for anyone who is not the owner. The owner records what was
+/// collected and sets each member's share; members see the figures but cannot
+/// change them, so the numbers a person is shown cannot be altered by the person
+/// being shown them to.
 class MemberDetailScreen extends ConsumerStatefulWidget {
-  final Member member;
+  /// The person's display name, and the roster address their collection is
+  /// stored under.
+  ///
+  /// Both are passed directly rather than a whole member record, because the
+  /// figures now come from the shared roster. Passing a local member row would
+  /// reintroduce the second source of truth this screen no longer needs.
+  final String name;
+  final String? email;
   final DateTime month;
 
-  const MemberDetailScreen({super.key, required this.member, required this.month});
+  const MemberDetailScreen({
+    super.key,
+    required this.name,
+    required this.email,
+    required this.month,
+  });
 
   @override
   ConsumerState<MemberDetailScreen> createState() =>
@@ -24,11 +42,17 @@ class MemberDetailScreen extends ConsumerStatefulWidget {
 
 class _MemberDetailScreenState extends ConsumerState<MemberDetailScreen> {
   late String _month;
-  int? _collectionId;
-  double _amountDue = 0;
-  double _paid = 0;
-  List<Payment> _payments = [];
+  MemberCollection? _collection;
   bool _loading = true;
+
+  /// The roster address for this person, normalised. A field rather than a local
+  /// so the write paths below can use it; a member row with no email simply has
+  /// no collection to record against.
+  String get _email => (widget.email ?? '').trim().toLowerCase();
+
+  double get _amountDue => _collection?.amountDue ?? 0;
+  double get _paid => _collection?.paid ?? 0;
+  List<CloudPayment> get _payments => _collection?.payments ?? const [];
 
   @override
   void initState() {
@@ -38,17 +62,28 @@ class _MemberDetailScreenState extends ConsumerState<MemberDetailScreen> {
   }
 
   Future<void> _load() async {
-    final repo = ref.read(repositoryProvider);
-    final collection = await repo.getCollection(widget.member.id!, _month);
-    final payments = await repo.getPayments(collection.id!);
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null || _email.isEmpty) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+
+    // Read from Firestore, so this screen shows the same figures as everyone
+    // else rather than whatever happens to be in this device's database.
+    final collection = await ref
+        .read(messCloudServiceProvider)
+        .collectionFor(mess.id, _email, _month);
+
     if (!mounted) return;
     setState(() {
-      _collectionId = collection.id;
-      _amountDue = collection.amountDue;
-      _paid = payments.fold<double>(0, (s, p) => s + p.amount);
-      _payments = payments;
+      _collection = collection;
       _loading = false;
     });
+  }
+
+  /// Refreshes both this screen and the Collection tab behind it.
+  void _refreshShared(String month) {
+    ref.invalidate(sharedCollectionsProvider(month));
   }
 
   double get _remaining {
@@ -78,9 +113,9 @@ class _MemberDetailScreenState extends ConsumerState<MemberDetailScreen> {
         confirmLabel: 'Add',
         initialValue: remaining > 0 ? remaining.toStringAsFixed(0) : '',
         subtitle: remaining > 0
-            ? '${widget.member.name} still owes ${money.format(remaining)} '
+            ? '${widget.name} still owes ${money.format(remaining)} '
                 'this month — change it if they are paying something else.'
-            : '${widget.member.name} has nothing outstanding this month.',
+            : '${widget.name} has nothing outstanding this month.',
         quickAmounts: quicks,
       ),
     );
@@ -106,13 +141,28 @@ class _MemberDetailScreenState extends ConsumerState<MemberDetailScreen> {
       if (picked != null) date = picked;
     }
 
-    await ref.read(repositoryProvider).addPayment(
-          collectionId: _collectionId!,
-          amount: amount,
-          date: date,
-        );
-    await refreshTotals(ref);
-    ref.invalidate(monthCollectionsProvider);
+    // Written to Firestore, so the payment is the same for everyone in the mess
+    // and only the owner can record it — enforced by the rules, not just here.
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+
+    try {
+      await ref.read(messCloudServiceProvider).addCollectionPayment(
+            messId: mess.id,
+            email: _email,
+            month: _month,
+            amount: amount,
+            date: dayKey(date),
+          );
+    } on CloudMessage catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(e.text)));
+      }
+      return;
+    }
+
+    _refreshShared(_month);
     await _load();
   }
 
@@ -126,14 +176,28 @@ class _MemberDetailScreenState extends ConsumerState<MemberDetailScreen> {
         numeric: true,
       ),
     );
-    if (value != null) {
-      final amount = double.tryParse(value.replaceAll(',', '')) ?? 0;
-      await ref
-          .read(repositoryProvider)
-          .setMonthlyShare(widget.member.id!, _month, amount);
-      ref.invalidate(monthCollectionsProvider);
-      await _load();
+    if (value == null || !mounted) return;
+
+    final amount = double.tryParse(value.replaceAll(',', '')) ?? 0;
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+
+    try {
+      await ref.read(messCloudServiceProvider).setMonthlyShare(
+            messId: mess.id,
+            email: _email,
+            month: _month,
+            amount: amount,
+          );
+    } on CloudMessage catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.text)));
+      return;
     }
+
+    _refreshShared(_month);
+    await _load();
   }
 
   @override
@@ -142,8 +206,13 @@ class _MemberDetailScreenState extends ConsumerState<MemberDetailScreen> {
         NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
     final remaining = _amountDue - _paid;
 
+    // Collections are the owner's record to keep. Read from the membership
+    // document rather than cached, so it is correct on first open.
+    final isOwner =
+        ref.watch(activeMessProvider).valueOrNull?.isOwner ?? false;
+
     return Scaffold(
-      appBar: AppBar(title: Text(widget.member.name)),
+      appBar: AppBar(title: Text(widget.name)),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
@@ -192,37 +261,74 @@ class _MemberDetailScreenState extends ConsumerState<MemberDetailScreen> {
                         ],
                       ),
                       const SizedBox(height: 20),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: _setShare,
-                              icon: const Icon(Icons.edit, size: 18),
-                              label: const Text('Set share'),
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: Colors.white,
-                                side: const BorderSide(color: Colors.white54),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(14)),
+                      // Only the owner records collections. A member sees the
+                      // figures and nothing else — no way to set a share or log
+                      // a payment against themselves.
+                      if (isOwner) ...[
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: _setShare,
+                                icon: const Icon(Icons.edit, size: 18),
+                                label: const Text('Set share'),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: Colors.white,
+                                  side:
+                                      const BorderSide(color: Colors.white54),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius:
+                                          BorderRadius.circular(14)),
+                                ),
                               ),
                             ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: FilledButton.icon(
-                              onPressed: _addPayment,
-                              icon: const Icon(Icons.add, size: 18),
-                              label: const Text('Add payment'),
-                              style: FilledButton.styleFrom(
-                                backgroundColor: Colors.white,
-                                foregroundColor: AppTheme.secondary,
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(14)),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: FilledButton.icon(
+                                onPressed: _addPayment,
+                                icon: const Icon(Icons.add, size: 18),
+                                label: const Text('Add payment'),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: Colors.white,
+                                  foregroundColor: AppTheme.secondary,
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius:
+                                          BorderRadius.circular(14)),
+                                ),
                               ),
                             ),
+                          ],
+                        ),
+                      ] else
+                        // Said plainly, so a missing button does not read as a
+                        // bug or as their account being broken.
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 11),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.10),
+                            borderRadius: BorderRadius.circular(12),
                           ),
-                        ],
-                      ),
+                          child: const Row(
+                            children: [
+                              Icon(Icons.lock_outline,
+                                  size: 16, color: Colors.white70),
+                              SizedBox(width: 9),
+                              Expanded(
+                                child: Text(
+                                  'Only the mess owner records collections and '
+                                  'payments. You can see what is owed.',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    height: 1.35,
+                                    color: Colors.white70,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -266,9 +372,13 @@ class _MemberDetailScreenState extends ConsumerState<MemberDetailScreen> {
                                           fontWeight: FontWeight.w700,
                                           fontSize: 15)),
                                   const SizedBox(height: 2),
-                                  Text(DateFormat.yMMMEd().format(p.date),
-                                      style:
-                                          Theme.of(context).textTheme.bodySmall),
+                                  Text(
+                                    p.date == null
+                                        ? 'no date'
+                                        : DateFormat.yMMMEd().format(p.date!),
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall,
+                                  ),
                                 ],
                               ),
                             ),

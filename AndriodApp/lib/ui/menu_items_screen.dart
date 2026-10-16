@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 
 import '../data/models.dart';
 import '../providers.dart';
+import '../services/menu_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'widgets/item_dialog.dart';
@@ -13,7 +14,7 @@ import 'widgets/item_dialog.dart';
 /// Anything saved here is stored against the menu, so it shows up every time
 /// this menu is picked while adding a daily entry.
 class MenuItemsScreen extends ConsumerStatefulWidget {
-  final Menu menu;
+  final CloudMenu menu;
 
   const MenuItemsScreen({super.key, required this.menu});
 
@@ -22,34 +23,24 @@ class MenuItemsScreen extends ConsumerStatefulWidget {
 }
 
 class _MenuItemsScreenState extends ConsumerState<MenuItemsScreen> {
-  List<MenuItem> _items = [];
-  bool _loading = true;
-
   @override
   void initState() {
     super.initState();
-    _load();
   }
 
-  Future<void> _load() async {
-    final items =
-        await ref.read(repositoryProvider).getMenuItems(widget.menu.id!);
-    if (!mounted) return;
-    setState(() {
-      _items = items;
-      _loading = false;
-    });
-  }
+  /// The live catalogue, so an item saved here is the one everyone else sees.
+  List<CloudMenuItem> get _items =>
+      ref.watch(menusProvider).valueOrNull?.byId(widget.menu.id)?.items ??
+      const [];
+
+  MenusNotifier get _menus => ref.read(menusProvider.notifier);
 
   Future<void> _afterChange() async {
-    ref.read(dataVersionProvider.notifier).state++;
-    ref.invalidate(menuItemCountsProvider);
-    await _load();
+    ref.invalidate(menusProvider);
   }
 
   Future<void> _addItem() async {
-    final suggestions = await _suggestions();
-    if (!mounted) return;
+    final suggestions = _suggestions();
     final result = await showDialog<({String name, double price})>(
       context: context,
       builder: (_) => ItemDialog(
@@ -61,11 +52,7 @@ class _MenuItemsScreenState extends ConsumerState<MenuItemsScreen> {
     );
     if (result == null || !mounted) return;
 
-    await ref.read(repositoryProvider).addMenuItem(
-          widget.menu.id!,
-          result.name,
-          result.price,
-        );
+    await _menus.addItem(widget.menu.id, result.name, result.price);
     await _afterChange();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -75,36 +62,37 @@ class _MenuItemsScreenState extends ConsumerState<MenuItemsScreen> {
 
   /// Items used in other menus, offered as one-tap suggestions.
   ///
-  /// Never throws: if the lookup fails the dialog simply shows no shortcuts.
-  Future<List<ItemSuggestion>> _suggestions() async {
-    try {
-      final rows = await ref
-          .read(repositoryProvider)
-          .getItemSuggestions(widget.menu.id!);
-      return rows
-          .map((r) {
-            final raw = (r['menus'] as String?) ?? '';
-            final menus = raw
-                .split(',')
-                .map((m) => m.trim())
-                .where((m) => m.isNotEmpty)
-                .join(', ');
-            return ItemSuggestion(
-              (r['name'] as String?) ?? '',
-              menus,
-              (r['last_price'] as num?)?.toDouble() ?? 0,
-            );
-          })
-          .where((s) => s.name.trim().isNotEmpty)
-          .toList();
-    } catch (_) {
-      return const [];
+  /// Taken from the catalogue already in memory, so this cannot be out of step
+  /// with what the rest of the screen is showing.
+  List<ItemSuggestion> _suggestions() {
+    final catalogue = ref.read(menusProvider).valueOrNull;
+    if (catalogue == null) return const [];
+
+    final byName = <String, List<String>>{};
+    final price = <String, double>{};
+    for (final menu in catalogue.menus) {
+      if (menu.id == widget.menu.id) continue;
+      for (final item in menu.items) {
+        final key = item.name.trim().toLowerCase();
+        if (key.isEmpty) continue;
+        byName.putIfAbsent(key, () => []).add(menu.name);
+        final seen = price[key] ?? 0;
+        if (item.defaultPrice > seen) price[key] = item.defaultPrice;
+      }
     }
+
+    final keys = byName.keys.toList()..sort();
+    return [
+      for (final key in keys)
+        ItemSuggestion(
+          key,
+          byName[key]!.join(', '),
+          price[key] ?? 0,
+        ),
+    ];
   }
 
-  Future<void> _editItem(MenuItem item) async {
-    final suggestions = await _suggestions();
-    if (!mounted) return;
+  Future<void> _editItem(CloudMenuItem item) async {
     final result = await showDialog<({String name, double price})>(
       context: context,
       builder: (_) => ItemDialog(
@@ -112,7 +100,7 @@ class _MenuItemsScreenState extends ConsumerState<MenuItemsScreen> {
         confirmLabel: 'Save',
         initialName: item.name,
         initialPrice: item.defaultPrice,
-        suggestions: suggestions,
+        suggestions: _suggestions(),
         existingNames: _items
             .where((i) => i.id != item.id)
             .map((i) => i.name.toLowerCase())
@@ -121,15 +109,12 @@ class _MenuItemsScreenState extends ConsumerState<MenuItemsScreen> {
     );
     if (result == null || !mounted) return;
 
-    await ref.read(repositoryProvider).updateMenuItem(
-          item.id!,
-          result.name,
-          result.price,
-        );
+    await _menus.updateItem(
+        widget.menu.id, item.id, result.name, result.price);
     await _afterChange();
   }
 
-  Future<void> _deleteItem(MenuItem item) async {
+  Future<void> _deleteItem(CloudMenuItem item) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -147,7 +132,7 @@ class _MenuItemsScreenState extends ConsumerState<MenuItemsScreen> {
       ),
     );
     if (ok != true) return;
-    await ref.read(repositoryProvider).deleteMenuItem(item.id!);
+    await _menus.deleteItem(widget.menu.id, item.id);
     await _afterChange();
   }
 
@@ -166,9 +151,7 @@ class _MenuItemsScreenState extends ConsumerState<MenuItemsScreen> {
 
     return Scaffold(
       appBar: AppBar(title: Text('${widget.menu.name} items')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _items.isEmpty
+      body: _items.isEmpty
               ? Center(
                   child: Padding(
                     padding: const EdgeInsets.all(32),

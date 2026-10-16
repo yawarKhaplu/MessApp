@@ -4,6 +4,8 @@ import 'package:intl/intl.dart';
 
 import '../data/models.dart';
 import '../providers.dart';
+import '../services/mess_cloud_service.dart';
+import '../services/expense_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'edit_expense_screen.dart';
@@ -21,9 +23,8 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   // Held as fields so each query runs once instead of on every rebuild.
-  Future<Map<String, double>>? _budgetFuture;
-  Future<List<Map<String, Object?>>>? _entriesFuture;
-  Future<_CookInfo>? _cookFuture;
+  // The budget and today's entries both come from the shared bundle now, so
+  // there is nothing held here to fetch or refresh by hand.
 
   @override
   void initState() {
@@ -33,10 +34,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   void _startQueries() {
-    final repo = ref.read(repositoryProvider);
-    _budgetFuture = repo.getTodayBudget();
-    _entriesFuture = repo.getDayExpenses(DateTime.now());
-    _cookFuture = _loadCookInfo();
+    // Everything is read through providers now; asking them to re-read during
+    // initState is what produced the "dependOnInherited... was called before
+    // initState completed" error — the tree was not mounted yet. The first real
+    // read happens after the frame, in _refresh().
   }
 
   Future<void> _refresh() async {
@@ -44,40 +45,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _startQueries();
   }
 
-  /// Cooking turn info for today, plus any manual override already saved
-  /// on one of today's entries.
-  Future<_CookInfo> _loadCookInfo() async {
-    final repo = ref.read(repositoryProvider);
-    final rotation = await repo.getCookRotation();
-    if (!rotation.turnsAreSure) {
-      return _CookInfo(rotation, null);
-    }
-    final entries = await repo.getDayExpenses(DateTime.now());
-    Member? assigned;
-    for (final e in entries) {
-      final id = e['member_id'] as int?;
-      if (id == null) continue;
-      for (final m in rotation.members) {
-        if (m.id == id) {
-          assigned = m;
-          break;
-        }
-      }
-      if (assigned != null) break;
-    }
-    return _CookInfo(rotation, assigned);
-  }
-
-  /// Let the user decide who has the bari today. Re-anchors the cycle so the
-  /// choice sticks instead of snapping back to a date-based schedule.
+  /// Let the owner decide who has the bari today.
+  ///
+  /// Writes the anchor to the mess document, so the whole mess sees the change
+  /// rather than just this device. Members get no such action.
   Future<void> _changeBari(
-      BuildContext context, WidgetRef ref, CookRotation rot) async {
-    final picked = await showDialog<Member>(
+      BuildContext context, WidgetRef ref, MessTurn turn) async {
+    final mess = ref.read(activeMessProvider).valueOrNull;
+    if (mess == null) return;
+
+    final picked = await showDialog<MessMember>(
       context: context,
       builder: (ctx) => SimpleDialog(
         title: const Text('Who has the bari today?'),
         children: [
-          for (final m in rot.members)
+          for (final m in turn.order)
             SimpleDialogOption(
               onPressed: () => Navigator.pop(ctx, m),
               child: Padding(
@@ -87,8 +69,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     Icon(Icons.person_outline,
                         size: 18, color: AppTheme.primary),
                     const SizedBox(width: 10),
-                    Expanded(child: Text(m.name)),
-                    if (m.id == rot.cook?.id)
+                    Expanded(child: Text(m.displayName)),
+                    if (m.email.toLowerCase() ==
+                        turn.today?.email.toLowerCase())
                       const AppBadge(
                         label: 'ON TURN',
                         color: AppTheme.secondary,
@@ -102,17 +85,32 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ),
     );
     if (picked == null || !mounted) return;
-    await ref.read(repositoryProvider).setBari(DateTime.now(), picked);
-    await refreshTotals(ref);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('${picked.name} has the bari today')),
-    );
+
+    try {
+      await ref.read(messCloudServiceProvider).setTurn(
+            messId: mess.id,
+            anchorDate: DateTime.now(),
+            anchorEmail: picked.email,
+            order: turn.order.map((m) => m.email).toList(),
+          );
+      // The anchor lives on the mess document, so re-read it.
+      ref.invalidate(activeMessProvider);
+      await refreshTotals(ref);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${picked.name ?? picked.email} has the bari today')),
+      );
+    } on CloudMessage catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.text)),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final todayTotal = ref.watch(todayTotalProvider);
+    final todayTotal = ref.watch(todaySpendProvider);
     // Re-query the cooking rotation whenever it changes.
     ref.watch(rotationTickProvider);
     // Re-query today's entries after any edit or delete.
@@ -121,6 +119,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     final currency = settingsAsync.valueOrNull?.currency ?? 'PKR';
     final money = NumberFormat.currency(symbol: '$currency ', decimalDigits: 0);
+
+    // What this account may do on Home. The owner can always record; anyone
+    // else only on their own turn.
+    final mess = ref.watch(activeMessProvider).valueOrNull;
+    final isOwner = mess?.isOwner ?? false;
+    final canRecordCook = ref.watch(canRecordTodaysCookProvider);
+    final turn = ref.watch(messTurnProvider);
+
+    // Needed to decide who recorded each entry, which is what separates the
+    // owner's edit from the turn member's.
+    final myEmail = ref.watch(currentUserProvider).valueOrNull?.email;
 
     return Scaffold(
       body: SafeArea(
@@ -152,7 +161,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('MessApp',
+                    Text('MessAppDev',
                         style: Theme.of(context).textTheme.titleLarge),
                     Text(DateFormat('EEEE, d MMMM').format(DateTime.now()),
                         style: Theme.of(context).textTheme.bodySmall),
@@ -162,18 +171,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             const SizedBox(height: 24),
 
-            // Today's budget hero (budget / spent / remaining)
-            FutureBuilder<Map<String, double>>(
-              future: _budgetFuture,
-              builder: (context, snap) {
-                final b = snap.data;
-                final spent = b?['spent'] ?? 0;
+            // Today's budget hero (budget / spent / remaining), read from the
+            // shared bundle so it cannot disagree with the daily report.
+            ref.watch(todayBudgetProvider).when(
+              loading: () => const SizedBox(height: 180),
+              error: (e, _) => const SizedBox(height: 180),
+              data: (t) {
                 // Today's frozen allowance. Spending today cannot move it, so the
                 // number on screen is the number being enforced.
-                final capToday = b?['capToday'] ?? 0;
-                final capLeft = b?['capLeft'] ?? 0;
-                final daysLeft = (b?['daysLeft'] ?? 0).round();
-                final hasTarget = (b?['hasTarget'] ?? 0) > 0;
+                final capToday = t.capToday;
+                final capLeft = t.capLeft;
+                final daysLeft = t.daysLeft;
+                final hasTarget = t.hasTarget;
+                final spent = t.spent;
                 // Inside today's allowance or past it.
                 final onTrack = spent < capToday;
                 final remaining = capLeft;
@@ -333,228 +343,274 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             const SpendingTrendCard(),
             const SizedBox(height: 16),
 
-            // Today's bari (cooking turn) — user-controlled rotation.
-            FutureBuilder<_CookInfo>(
-              future: _cookFuture,
-              builder: (context, snap) {
-                final info = snap.data;
-                if (info == null || !info.rotation.turnsAreSure) {
-                  return const SizedBox.shrink();
-                }
-                final rot = info.rotation;
-                final onTurn = info.assigned ?? rot.cook!;
-                final overridden = info.assigned != null &&
-                    info.assigned!.id != rot.cook!.id;
+            // Today's bari (cooking turn) — read live from the mess document so the whole
+            // mess sees the same person. Owner-only action; members read it on
+            // their own screen.
+            Builder(builder: (context) {
+              final mess = ref.watch(activeMessProvider).valueOrNull;
+              final turn = ref.watch(messTurnProvider);
+              if (mess == null || !turn.hasMembers || turn.today == null) {
+                return const SizedBox.shrink();
+              }
+              final onTurn = turn.today!;
+              final name = onTurn.name ?? onTurn.email;
 
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    AppCard(
-                      onTap: () => _changeBari(context, ref, rot),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Container(
-                                width: 46,
-                                height: 46,
-                                decoration: BoxDecoration(
-                                  gradient: const LinearGradient(
-                                    colors: [
-                                      AppTheme.secondary,
-                                      Color(0xFF00695C)
-                                    ],
-                                  ),
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                                child: const Icon(Icons.rotate_right,
-                                    color: Colors.white, size: 24),
-                              ),
-                              const SizedBox(width: 14),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text("Today's bari",
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .titleMedium),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      'Turn ${rot.positionInRound} of ${rot.roundLength} · tap to change',
-                                      style: Theme.of(context)
-                                          .textTheme
-                                          .bodySmall,
-                                    ),
+              // Is it this person's turn? Matched on email, lowercased on both
+              // sides because Google returns the address as the account stores
+              // it. This is the difference between "Ali has the bari" and
+              // "the bari is yours today", which is what someone actually wants
+              // to know when they open the app.
+              final myEmail = ref
+                  .watch(currentUserProvider)
+                  .valueOrNull
+                  ?.email
+                  ?.trim()
+                  .toLowerCase();
+              final isMyTurn = myEmail != null &&
+                  myEmail.isNotEmpty &&
+                  myEmail == onTurn.email.trim().toLowerCase();
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Only when it is actually your turn. A quiet banner rather
+                  // than a whole card change, so the rest of the home screen
+                  // keeps its normal shape.
+                  if (isMyTurn) ...[
+                    _YourTurnBanner(name: name),
+                    const SizedBox(height: 12),
+                  ],
+                  AppCard(
+                    // Tapping to change is an owner action. A member sees the
+                    // same card but cannot alter the mess schedule.
+                    onTap: mess.isOwner
+                        ? () => _changeBari(context, ref, turn)
+                        : null,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              width: 46,
+                              height: 46,
+                              decoration: BoxDecoration(
+                                gradient: const LinearGradient(
+                                  colors: [
+                                    AppTheme.secondary,
+                                    Color(0xFF00695C)
                                   ],
                                 ),
+                                borderRadius: BorderRadius.circular(14),
                               ),
-                            ],
-                          ),
-                          const SizedBox(height: 14),
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 14),
-                            decoration: BoxDecoration(
-                              color: AppTheme.secondary.withOpacity(0.08),
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(
-                                  color: AppTheme.secondary.withOpacity(0.25)),
+                              child: const Icon(Icons.rotate_right,
+                                  color: Colors.white, size: 24),
                             ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.restaurant,
-                                    color: AppTheme.secondary, size: 20),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    onTurn.name,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w800,
-                                      fontSize: 17,
-                                      color: AppTheme.textPrimary,
-                                    ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    isMyTurn ? "Today's bari is you" : "Today's bari",
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleMedium,
                                   ),
-                                ),
-                                if (overridden)
-                                  const AppBadge(
-                                    label: 'CHANGED',
-                                    color: AppTheme.accent,
-                                    icon: Icons.edit,
-                                  )
-                                else if (rot.followsHistory)
-                                  const AppBadge(
-                                    label: 'AUTO',
-                                    color: AppTheme.textSecondary,
-                                    icon: Icons.history,
-                                  )
-                                else
-                                  const AppBadge(
-                                    label: 'ON TURN',
-                                    color: AppTheme.secondary,
-                                    icon: Icons.bolt,
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    'Turn ${turn.positionInRound} of '
+                                    '${turn.roundLength}'
+                                    '${mess.isOwner ? ' · tap to change' : ''}',
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall,
                                   ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          _TurnDots(
-                            members: rot.members,
-                            currentIndex: rot.positionInRound - 1,
-                          ),
-                          const SizedBox(height: 10),
-                          Row(
-                            children: [
-                              Icon(Icons.event_repeat,
-                                  size: 14,
-                                  color: AppTheme.textSecondary
-                                      .withOpacity(0.9)),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  rot.roundJustCompleted
-                                      ? 'Everyone has cooked — a fresh round starts today'
-                                      : rot.followsHistory
-                                          ? 'Next up: ${rot.next?.name ?? '—'} · based on who cooked last'
-                                          : 'Next up: ${rot.next?.name ?? '—'} · back again in ${rot.daysUntilNextTurn} ${rot.daysUntilNextTurn == 1 ? 'day' : 'days'}',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: AppTheme.textSecondary
-                                        .withOpacity(0.9),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          if (rot.upcoming.length > 1) ...[
-                            const SizedBox(height: 12),
-                            const Divider(height: 1),
-                            const SizedBox(height: 12),
-                            SizedBox(
-                              height: 66,
-                              child: ListView.separated(
-                                scrollDirection: Axis.horizontal,
-                                itemCount: rot.upcoming.length,
-                                separatorBuilder: (_, __) =>
-                                    const SizedBox(width: 8),
-                                itemBuilder: (context, i) {
-                                  final t = rot.upcoming[i];
-                                  final isToday = i == 0;
-                                  return Container(
-                                    width: 74,
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 6, vertical: 8),
-                                    decoration: BoxDecoration(
-                                      color: isToday
-                                          ? AppTheme.secondary
-                                              .withOpacity(0.12)
-                                          : AppTheme.primary
-                                              .withOpacity(0.05),
-                                      borderRadius: BorderRadius.circular(12),
-                                      border: Border.all(
-                                        color: isToday
-                                            ? AppTheme.secondary
-                                                .withOpacity(0.35)
-                                            : AppTheme.divider,
-                                      ),
-                                    ),
-                                    child: Column(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.center,
-                                      children: [
-                                        Text(
-                                          isToday
-                                              ? 'Today'
-                                              : DateFormat('EEE')
-                                                  .format(t.date)
-                                                  .toUpperCase(),
-                                          style: TextStyle(
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.w700,
-                                            color: isToday
-                                                ? AppTheme.secondary
-                                                : AppTheme.textSecondary,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          t.member.name.split(' ').first,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w700,
-                                            color: isToday
-                                                ? AppTheme.secondary
-                                                : AppTheme.textPrimary,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                },
+                                ],
                               ),
                             ),
                           ],
+                        ),
+                        const SizedBox(height: 14),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 14),
+                          decoration: BoxDecoration(
+                            color: AppTheme.secondary.withOpacity(0.08),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                                color:
+                                    AppTheme.secondary.withOpacity(0.25)),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.restaurant,
+                                  color: AppTheme.secondary, size: 20),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  name,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 17,
+                                    color: AppTheme.textPrimary,
+                                  ),
+                                ),
+                              ),
+                              const AppBadge(
+                                label: 'ON TURN',
+                                color: AppTheme.secondary,
+                                icon: Icons.bolt,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        _TurnDots(
+                          count: turn.order.length,
+                          currentIndex: turn.positionInRound - 1,
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Icon(Icons.event_repeat,
+                                size: 14,
+                                color:
+                                    AppTheme.textSecondary.withOpacity(0.9)),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                turn.roundLength == 1
+                                    ? 'Next up: ${turn.next?.name ?? turn.next?.email ?? '—'}'
+                                    : 'Next up: ${turn.next?.name ?? turn.next?.email ?? '—'}'
+                                        ' · back again in ${turn.roundLength - 1} '
+                                        '${turn.roundLength - 1 == 1 ? 'day' : 'days'}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: AppTheme.textSecondary
+                                      .withOpacity(0.9),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (turn.upcoming.length > 1) ...[
+                          const SizedBox(height: 12),
+                          const Divider(height: 1),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            height: 66,
+                            child: ListView.separated(
+                              scrollDirection: Axis.horizontal,
+                              itemCount: turn.upcoming.length,
+                              separatorBuilder: (_, __) =>
+                                  const SizedBox(width: 8),
+                              itemBuilder: (context, i) {
+                                final t = turn.upcoming[i];
+                                final isToday = i == 0;
+                                final who = t.member.name ?? t.member.email;
+                                // A future day that is this person's turn, so
+                                // they can see when it next comes round to them.
+                                final isMe = myEmail != null &&
+                                    myEmail.isNotEmpty &&
+                                    myEmail ==
+                                        t.member.email.trim().toLowerCase();
+                                return Container(
+                                  width: 74,
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 6, vertical: 8),
+                                  decoration: BoxDecoration(
+                                    color: isToday
+                                        ? AppTheme.secondary.withOpacity(0.12)
+                                        : isMe
+                                            ? AppTheme.accent.withOpacity(0.10)
+                                            : AppTheme.primary.withOpacity(0.05),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: isToday
+                                          ? AppTheme.secondary
+                                              .withOpacity(0.35)
+                                          : isMe
+                                              ? AppTheme.accent
+                                                  .withOpacity(0.45)
+                                              : AppTheme.divider,
+                                    ),
+                                  ),
+                                  child: Column(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.center,
+                                    children: [
+                                      Text(
+                                        isToday
+                                            ? 'Today'
+                                            : DateFormat('EEE')
+                                                .format(t.date)
+                                                .toUpperCase(),
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w700,
+                                          color: isToday
+                                              ? AppTheme.secondary
+                                              : AppTheme.textSecondary,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        who.trim().split(' ').first,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        textAlign: TextAlign.center,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
+                                          color: isToday
+                                              ? AppTheme.secondary
+                                              : isMe
+                                                  ? AppTheme.accent
+                                                  : AppTheme.textPrimary,
+                                        ),
+                                      ),
+                                      // Marks which chip is this person, so
+                                      // they need not recognise their own name
+                                      // in a short list.
+                                      if (isMe && !isToday)
+                                        const Padding(
+                                          padding: EdgeInsets.only(top: 2),
+                                          child: Text(
+                                            'YOU',
+                                            style: TextStyle(
+                                              fontSize: 8,
+                                              fontWeight: FontWeight.w800,
+                                              letterSpacing: 0.5,
+                                              color: AppTheme.accent,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
                         ],
-                      ),
+                      ],
                     ),
-                    const SizedBox(height: 16),
-                  ],
-                );
-              },
-            ),
-            AppCard(
-              onTap: () async {
-                await Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const MenuEntryScreen()),
-                );
-                _refresh();
-              },
+                  ),
+                  const SizedBox(height: 16),
+                ],
+              );
+            }),
+            // A second route into the same screen, so the same rule has to apply here or
+            // it becomes a way around the button below.
+            if (canRecordCook)
+              AppCard(
+                onTap: () async {
+                  await Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const MenuEntryScreen()),
+                  );
+                  _refresh();
+                },
               child: Row(
                 children: [
                   Container(
@@ -592,80 +648,147 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             const SizedBox(height: 24),
 
-            // Today's entries (visible + editable)
-            FutureBuilder<List<Map<String, Object?>>>(
-              future: _entriesFuture,
-              builder: (context, snap) {
-                final entries = snap.data ?? const <Map<String, Object?>>[];
-                if (entries.isEmpty) return const SizedBox.shrink();
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SectionHeader(
-                      title: "Today's entries",
-                      icon: Icons.checklist,
-                      action: AppBadge(
-                        label: '${entries.length} saved',
-                        color: AppTheme.success,
-                        icon: Icons.check,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    for (final e in entries)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: _TodayEntryTile(
-                          expense: Expense(
-                            id: e['id'] as int?,
-                            date: DateTime.parse(e['date'] as String),
-                            menuId: e['menu_id'] as int?,
-                            memberId: e['member_id'] as int?,
-                            total: (e['total'] as num?)?.toDouble() ?? 0,
-                          ),
-                          menuName:
-                              e['menu_name'] as String? ?? 'Menu entry',
-                          memberName: e['member_name'] as String?,
-                          date: DateTime.parse(e['date'] as String),
-                          money: money,
-                          onChanged: _refresh,
+            // Today's entries, read from Firestore so the whole mess sees the same list.
+            Builder(builder: (context) {
+              // Two different keys on purpose: the provider is queried by month
+              // because that is how expenses are partitioned, while the entries
+              // kept from it are filtered by day because that is what "today"
+              // means. Using one for both silently returns the wrong set.
+              //
+              // Named apart from the callback's own parameter below, because a
+              // shadowed name here silently becomes the list rather than the
+              // key, and the wrong one is a compile error that only a build
+              // catches.
+              final monthOfToday = monthKey(DateTime.now());
+              final today = dayKey(DateTime.now());
+              final all = ref.watch(sharedExpensesProvider(monthOfToday));
+              return all.when(
+                loading: () => const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Center(child: CircularProgressIndicator()),
+                ),
+                error: (e, _) => AppCard(
+                  padding: const EdgeInsets.all(16),
+                  child: Text('Could not load entries: $e',
+                      style: Theme.of(context).textTheme.bodySmall),
+                ),
+                data: (entriesInMonth) {
+                  final entries =
+                      entriesInMonth.where((e) => e.date == today).toList();
+                  if (entries.isEmpty) return const SizedBox.shrink();
+
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SectionHeader(
+                        title: "Today's entries",
+                        icon: Icons.checklist,
+                        action: AppBadge(
+                          label: '${entries.length} saved',
+                          color: AppTheme.success,
+                          icon: Icons.check,
                         ),
                       ),
-                    const SizedBox(height: 14),
-                  ],
-                );
-              },
-            ),
+                      const SizedBox(height: 10),
+                      for (final e in entries)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: _TodayEntryTile(
+                            entry: e,
+                            money: money,
+
+                            // Decided per entry, not once for the list: the
+                            // owner may change any of them, but the turn member
+                            // may change only the ones they recorded. One flag
+                            // for the whole list would have to be the stricter of
+                            // the two, which would hide the owner's edit.
+                            canEdit: mess != null &&
+                                mayEditExpense(
+                                  mess: mess,
+                                  email: myEmail,
+                                  recordedBy: e.recordedBy ?? '',
+                                  cookEmail: e.cookEmail,
+                                ),
+
+                            // Name from the shared roster, so the row reads
+                            // "Akbar" rather than the front of his address.
+                            cookName: mess == null
+                                ? null
+                                : _nameOf(mess.members, e.cookEmail),
+                            onChanged: () {
+                              ref.invalidate(
+                                  sharedExpensesProvider(monthOfToday));
+                              _refresh();
+                            },
+                          ),
+                        ),
+                      const SizedBox(height: 14),
+                    ],
+                  );
+                },
+              );
+            }),
 
             // The big question
             Text('What did you cook today?',
                 style: Theme.of(context).textTheme.headlineSmall),
             const SizedBox(height: 16),
-            GradientButton(
-              label: 'Add today\'s menu',
-              icon: Icons.add_circle_outline,
-              onPressed: () async {
-                await Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const MenuEntryScreen()),
-                );
-                _refresh();
-              },
-            ),
-            const SizedBox(height: 12),
 
-            // Other expenses shortcut
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
+            // Only the person whose turn it is can record what they cooked, plus
+            // the owner who keeps the books. Everyone else is told when their turn
+            // comes rather than being shown a button that would be refused.
+            if (canRecordCook)
+              GradientButton(
+                label: 'Add today\'s menu',
+                icon: Icons.add_circle_outline,
                 onPressed: () async {
                   await Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => const OtherExpenseScreen()),
+                    MaterialPageRoute(builder: (_) => const MenuEntryScreen()),
                   );
                   _refresh();
                 },
-                icon: const Icon(Icons.receipt_long_outlined),
-                label: const Text('Add other expense (gas, rent, chai…)'),
+              )
+            else
+              AppCard(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    const Icon(Icons.schedule,
+                        size: 20, color: AppTheme.textSecondary),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        _nextTurnHint(
+                            turn,
+                            ref.watch(currentUserProvider)
+                                .valueOrNull
+                                ?.email,
+                          ),
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
+            const SizedBox(height: 12),
+
+            // Other expenses are the owner's paperwork: rent, gas and the like
+            // are recorded once for the mess, so only they may add them.
+            if (isOwner)
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () async {
+                    await Navigator.of(context).push(
+                      MaterialPageRoute(
+                          builder: (_) => const OtherExpenseScreen()),
+                    );
+                    _refresh();
+                  },
+                  icon: const Icon(Icons.receipt_long_outlined),
+                  label: const Text('Add other expense (gas, rent, chai…)'),
+                ),
+              ),
           ],
         ),
         ),
@@ -698,31 +821,140 @@ Widget _budgetCol(BuildContext context, String label, String value,
   );
 }
 
-/// Cooking turn for today plus any manual override already saved.
-class _CookInfo {
-  final CookRotation rotation;
-  final Member? assigned;
+/// Shown only when today is the signed-in person's turn.
+///
+/// Answered in plain words rather than left for the person to work out from a
+/// name on a card, because "is it me?" is the question someone opens the app
+/// with.
+class _YourTurnBanner extends StatelessWidget {
+  const _YourTurnBanner({required this.name});
 
-  const _CookInfo(this.rotation, this.assigned);
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [AppTheme.secondary, Color(0xFF00695C)],
+        ),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.restaurant, color: Colors.white, size: 22),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'It is your bari today',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+                fontSize: 16,
+              ),
+            ),
+          ),
+          const Icon(Icons.check_circle, color: Colors.white, size: 20),
+        ],
+      ),
+    );
+  }
 }
 
-/// Rotation progress dots: filled = already cooked this round,
-/// outlined = still waiting for their turn.
+/// Why the "Add today's menu" button is not showing, and when it will.
+///
+/// Says the actual next day rather than just "not your turn", so somebody
+/// waiting does not have to check the schedule separately.
+///
+/// Takes the signed-in address rather than reading a provider, so it is a pure
+/// function of the turn and the account and can be reasoned about on its own.
+String _nextTurnHint(MessTurn turn, String? email) {
+  final today = turn.today;
+  if (today == null) {
+    return 'Nobody is in the mess yet, so there is no cooking turn.';
+  }
+
+  final lower = (email ?? '').trim().toLowerCase();
+
+  if (lower.isNotEmpty && turn.upcoming.isNotEmpty) {
+    final startOfToday = turn.upcoming.first.date;
+
+    for (final entry in turn.upcoming) {
+      if (entry.member.email.trim().toLowerCase() != lower) continue;
+
+      // Days measured from today rather than from the list, so the wording does
+      // not depend on where in the preview the day happens to fall.
+      final days = entry.date.difference(startOfToday).inDays;
+
+      // Only a day still ahead is somebody else's problem. Zero days is today,
+      // which is the one case where the button *is* showing, so it must not be
+      // described as "not your turn".
+      if (days <= 0) continue;
+
+      if (days == 1) return 'Your turn is tomorrow.';
+      return 'Your turn is in $days days.';
+    }
+  }
+
+  // Either it is somebody else's turn today, or their turn has fallen outside
+  // the preview. Both read the same to the person waiting: it is not today.
+  return 'Today is ${_who(today)}. '
+      'You can record what was cooked on your turn.';
+}
+
+/// Best available name for someone in the roster.
+String _who(MessMember member) => member.displayName;
+
+/// Looks a person up in the shared roster by address.
+///
+/// Matched on the lowercased address because that is how the roster and an
+/// entry's cookEmail are both stored.
+///
+/// A member added without a real name has their address stored in the name
+/// field, which would otherwise put "yawarsdocument@gmail.com" on a card meant
+/// for "Yawar". Those cases fall back to the part before the @, which is short
+/// enough to read and is what the turn chips already show.
+///
+/// Returns null only when the address is not in the roster at all — somebody
+/// removed since cooking — so the caller can decide on its own fallback rather
+/// than being handed a blank.
+String? _nameOf(List<MessMember> roster, String email) {
+  final lower = email.trim().toLowerCase();
+  if (lower.isEmpty) return null;
+
+  for (final m in roster) {
+    if (m.email.trim().toLowerCase() != lower) continue;
+
+    final name = (m.name ?? '').trim();
+    if (name.isEmpty) return null;
+
+    // The name is really just the address again, so it is not a name.
+    if (name.contains('@') || name.toLowerCase() == lower) return null;
+
+    return name;
+  }
+  return null;
+}
+
+/// Rotation progress dots: filled = already had their turn this round,
+/// outlined = still waiting.
 class _TurnDots extends StatelessWidget {
-  final List<Member> members;
+  final int count;
   final int currentIndex;
 
-  const _TurnDots({required this.members, required this.currentIndex});
+  const _TurnDots({required this.count, required this.currentIndex});
 
   @override
   Widget build(BuildContext context) {
     return Row(
       children: [
-        for (int i = 0; i < members.length; i++) ...[
+        for (int i = 0; i < count; i++) ...[
           Expanded(
             child: Container(
               height: 6,
-              margin: EdgeInsets.only(right: i == members.length - 1 ? 0 : 6),
+              margin: EdgeInsets.only(right: i == count - 1 ? 0 : 6),
               decoration: BoxDecoration(
                 color: i <= currentIndex
                     ? AppTheme.secondary
@@ -737,39 +969,45 @@ class _TurnDots extends StatelessWidget {
   }
 }
 
-/// A single saved entry for today; tap to edit it.
+/// A single shared entry for today.
+///
+/// Visible to everyone in the mess. Editable by the admin on any entry, and by
+/// the turn member only on an entry they recorded themselves.
 class _TodayEntryTile extends StatelessWidget {
-  final Expense expense;
-  final String menuName;
-  final String? memberName;
-  final DateTime date;
+  final CloudExpense entry;
   final NumberFormat money;
+  final bool canEdit;
   final VoidCallback onChanged;
 
+  /// Name to show for whoever cooked, taken from the shared roster.
+  final String? cookName;
+
   const _TodayEntryTile({
-    required this.expense,
-    required this.menuName,
-    this.memberName,
-    required this.date,
+    required this.entry,
     required this.money,
+    required this.canEdit,
     required this.onChanged,
+    this.cookName,
   });
 
   @override
   Widget build(BuildContext context) {
+    // Falls back to the address's local part so the row is never blank, but the
+    // roster's name is preferred: "Akbar" rather than "akbar.baltim".
+    final cook = (cookName ?? entry.cookEmail.split('@').first).trim();
+    final showCook = cook.isNotEmpty;
+
     return AppCard(
-      onTap: () async {
-        await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => EditExpenseScreen(
-              expense: expense,
-              menuName: menuName,
-              date: date,
-            ),
-          ),
-        );
-        onChanged();
-      },
+      onTap: canEdit
+          ? () async {
+              await Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => EditExpenseScreen(entry: entry),
+                ),
+              );
+              onChanged();
+            }
+          : null,
       child: Row(
         children: [
           Container(
@@ -788,7 +1026,7 @@ class _TodayEntryTile extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(menuName,
+                Text(entry.menuName,
                     style: Theme.of(context).textTheme.titleMedium),
                 const SizedBox(height: 3),
                 Row(
@@ -799,13 +1037,13 @@ class _TodayEntryTile extends StatelessWidget {
                     Text('Saved',
                         style: TextStyle(
                             fontSize: 12, color: AppTheme.success)),
-                    if (memberName != null) ...[
+                    if (showCook) ...[
                       const SizedBox(width: 8),
                       Icon(Icons.person,
                           size: 12, color: AppTheme.textSecondary),
                       const SizedBox(width: 3),
                       Flexible(
-                        child: Text(memberName!,
+                        child: Text(cook,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                                 fontSize: 12,
@@ -820,21 +1058,22 @@ class _TodayEntryTile extends StatelessWidget {
           Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              Text(money.format(expense.total),
+              Text(money.format(entry.total),
                   style: const TextStyle(
                       fontWeight: FontWeight.w800, fontSize: 16)),
               const SizedBox(height: 2),
-              Row(
-                children: [
-                  Text('Edit',
-                      style: TextStyle(
-                          fontSize: 12,
-                          color: AppTheme.primary,
-                          fontWeight: FontWeight.w600)),
-                  Icon(Icons.chevron_right,
-                      size: 15, color: AppTheme.primary),
-                ],
-              ),
+              if (canEdit)
+                Row(
+                  children: [
+                    Text('Edit',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: AppTheme.primary,
+                            fontWeight: FontWeight.w600)),
+                    Icon(Icons.chevron_right,
+                        size: 15, color: AppTheme.primary),
+                  ],
+                ),
             ],
           ),
         ],

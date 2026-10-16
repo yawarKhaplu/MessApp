@@ -6,6 +6,8 @@ plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+    // Reads android/app/google-services.json for Firebase.
+    id("com.google.gms.google-services")
 }
 
 // Release signing for the Play Store upload key. See android/key.properties.
@@ -19,7 +21,10 @@ if (hasReleaseKey) {
 }
 
 android {
-    namespace = "com.messapp.messapp"
+    // Sandbox identity. A different applicationId means this app installs
+    // alongside the real MessApp, with its own database, its own notifications
+    // and its own uninstall. The real app is never touched.
+    namespace = "com.messapp.dev"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -47,8 +52,9 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.messapp.messapp"
+        // Sandbox application ID. Deliberately different from com.messapp.messapp
+        // so both apps coexist on one device with fully separate data.
+        applicationId = "com.messapp.dev"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

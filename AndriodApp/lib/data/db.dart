@@ -16,14 +16,15 @@ class AppDb {
     final today = _todayKey();
     return openDatabase(
       path,
-      version: 6,
+      version: 8,
       onUpgrade: (db, oldVersion, newVersion) async {
         // v2: track which member cooked/paid for each expense,
         // and allow a daily budget override in settings.
         if (oldVersion < 2) {
+          await db.execute('ALTER TABLE expenses ADD COLUMN member_id INTEGER');
           await db.execute(
-              'ALTER TABLE expenses ADD COLUMN member_id INTEGER');
-          await db.execute('ALTER TABLE settings ADD COLUMN daily_budget REAL NOT NULL DEFAULT 0');
+            'ALTER TABLE settings ADD COLUMN daily_budget REAL NOT NULL DEFAULT 0',
+          );
         }
         // v3: user-controlled cooking rotation, anchored on a date + member.
         if (oldVersion < 3) {
@@ -33,19 +34,41 @@ class AppDb {
         // follow real cooking history until they override it.
         if (oldVersion < 4) {
           await db.execute(
-              "ALTER TABLE rotation ADD COLUMN member_order TEXT NOT NULL DEFAULT ''");
+            "ALTER TABLE rotation ADD COLUMN member_order TEXT NOT NULL DEFAULT ''",
+          );
           await db.execute(
-              'ALTER TABLE rotation ADD COLUMN manual INTEGER NOT NULL DEFAULT 0');
+            'ALTER TABLE rotation ADD COLUMN manual INTEGER NOT NULL DEFAULT 0',
+          );
         }
         // v5: items keep their order inside a menu.
         if (oldVersion < 5) {
           await db.execute(
-              'ALTER TABLE menu_items ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+            'ALTER TABLE menu_items ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0',
+          );
         }
         // v6: recurring categories (rent, gas, cups…) get a monthly budget.
         if (oldVersion < 6) {
           await db.execute(
-              'ALTER TABLE other_categories ADD COLUMN monthly_budget REAL NOT NULL DEFAULT 0');
+            'ALTER TABLE other_categories ADD COLUMN monthly_budget REAL NOT NULL DEFAULT 0',
+          );
+        }
+        // v7: members link to the mess roster by email.
+        //
+        // The roster itself lives in Firestore; this column is only the link, so
+        // money recorded against a person cannot be orphaned when the shared
+        // roster changes. Nullable, because a row added before this version has
+        // no known email.
+        if (oldVersion < 7) {
+          await db.execute('ALTER TABLE members ADD COLUMN email TEXT');
+        }
+        if (oldVersion < 8) {
+          // Unlinked legacy members may all have NULL/empty emails. Coalescing
+          // them to one value made upgrades fail as soon as two members existed.
+          // Replace only the index; keep every member and payment reference.
+          await db.execute('DROP INDEX IF EXISTS idx_members_email');
+          await db.execute(
+            "CREATE UNIQUE INDEX idx_members_email ON members(email) WHERE email IS NOT NULL AND email != ''",
+          );
         }
       },
       onCreate: (db, version) async {
@@ -86,7 +109,8 @@ class AppDb {
         await db.execute('''
           CREATE TABLE members (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL
+            name TEXT NOT NULL,
+            email TEXT
           )
         ''');
         await db.execute('''
@@ -134,14 +158,23 @@ class AppDb {
     // Default menus with items.
     final pulao = await db.insert('menus', {'name': 'Pulao', 'is_default': 1});
     for (final item in ['Rice', 'Masala', 'Tomato', 'Onion']) {
-      await db.insert('menu_items',
-          {'menu_id': pulao, 'name': item, 'default_price': 0});
+      await db.insert('menu_items', {
+        'menu_id': pulao,
+        'name': item,
+        'default_price': 0,
+      });
     }
 
-    final karahi = await db.insert('menus', {'name': 'Karahi', 'is_default': 1});
+    final karahi = await db.insert('menus', {
+      'name': 'Karahi',
+      'is_default': 1,
+    });
     for (final item in ['Mutton', 'Tomato', 'Onion', 'Masala', 'Ginger']) {
-      await db.insert('menu_items',
-          {'menu_id': karahi, 'name': item, 'default_price': 0});
+      await db.insert('menu_items', {
+        'menu_id': karahi,
+        'name': item,
+        'default_price': 0,
+      });
     }
 
     // Default other-expense categories are stored in a simple table too,
@@ -159,6 +192,12 @@ class AppDb {
 
     // Default settings row.
     await db.insert('settings', {'id': 1});
+
+    // Same link the v8 migration creates, so a fresh install and an upgraded
+    // one end up with an identical schema.
+    await db.execute(
+      "CREATE UNIQUE INDEX idx_members_email ON members(email) WHERE email IS NOT NULL AND email != ''",
+    );
 
     // Cooking rotation starts today with the first member.
     await _createRotation(db, _todayKey());
@@ -184,17 +223,13 @@ class AppDb {
         manual INTEGER NOT NULL DEFAULT 0
       )
     ''');
-    await db.insert(
-      'rotation',
-      {
-        'id': 1,
-        'anchor_date': today,
-        'anchor_index': 0,
-        'member_order': '',
-        'manual': 0,
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await db.insert('rotation', {
+      'id': 1,
+      'anchor_date': today,
+      'anchor_index': 0,
+      'member_order': '',
+      'manual': 0,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   static String _todayKey() {

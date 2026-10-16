@@ -4,6 +4,10 @@ import 'package:intl/intl.dart';
 
 import '../data/models.dart';
 import '../providers.dart';
+import '../services/expense_cloud_service.dart';
+import '../services/mess_cloud_service.dart';
+import '../services/other_expense_cloud_service.dart';
+import '../services/report_cloud_service.dart';
 import '../ui/theme.dart';
 import '../ui/widgets/app_widgets.dart';
 import 'edit_expense_screen.dart';
@@ -92,8 +96,7 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen>
             },
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'month', child: Text('Filter by month')),
-              PopupMenuItem(
-                  value: 'range', child: Text('Custom date range')),
+              PopupMenuItem(value: 'range', child: Text('Custom date range')),
             ],
           ),
         ],
@@ -104,12 +107,19 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen>
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Row(
               children: [
-                const Icon(Icons.date_range, size: 18, color: AppTheme.textSecondary),
+                const Icon(
+                  Icons.date_range,
+                  size: 18,
+                  color: AppTheme.textSecondary,
+                ),
                 const SizedBox(width: 8),
-                Text(rangeLabel,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        color: AppTheme.textSecondary)),
+                Text(
+                  rangeLabel,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
               ],
             ),
           ),
@@ -154,134 +164,178 @@ class _WalletTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<Map<String, double>>(
-      future: _walletTotals(ref, range.from, range.to),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final collected = snap.data!['collected']!;
-        final spent = snap.data!['spent']!;
-        final balance = collected - spent;
+    return ref
+        .watch(reportBundleProvider)
+        .when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                FilledButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+          data: (bundle) {
+            final collected = bundle
+                .collectedBetween(dayKey(range.from), dayKey(range.to))
+                .collected;
+            final spent = bundle.spentBetween(
+              dayKey(range.from),
+              dayKey(range.to),
+            );
+            final balance = collected - spent;
 
-        return ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            Container(
-              padding: const EdgeInsets.all(28),
-              decoration: BoxDecoration(
-                gradient: balance >= 0
-                    ? const LinearGradient(
-                        colors: [AppTheme.success, Color(0xFF1B5E20)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      )
-                    : const LinearGradient(
-                        colors: [AppTheme.error, Color(0xFFB71C1C)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
+            return ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(28),
+                  decoration: BoxDecoration(
+                    gradient: balance >= 0
+                        ? const LinearGradient(
+                            colors: [AppTheme.success, Color(0xFF1B5E20)],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          )
+                        : const LinearGradient(
+                            colors: [AppTheme.error, Color(0xFFB71C1C)],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                    borderRadius: BorderRadius.circular(24),
+                    boxShadow: [
+                      BoxShadow(
+                        color:
+                            (balance >= 0 ? AppTheme.success : AppTheme.error)
+                                .withOpacity(0.3),
+                        blurRadius: 24,
+                        offset: const Offset(0, 10),
                       ),
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: [
-                  BoxShadow(
-                    color: (balance >= 0 ? AppTheme.success : AppTheme.error)
-                        .withOpacity(0.3),
-                    blurRadius: 24,
-                    offset: const Offset(0, 10),
+                    ],
                   ),
-                ],
-              ),
-              child: Column(
-                children: [
-                  Text('MESS WALLET',
-                      style: TextStyle(
-                        color: Colors.white.withOpacity(0.85),
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                        letterSpacing: 1.2,
-                      )),
-                  const SizedBox(height: 12),
-                  Text(
-                    money.format(balance),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 42,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -1.5,
-                    ),
+                  child: Column(
+                    children: [
+                      Text(
+                        'MESS WALLET',
+                        style: TextStyle(
+                          color: Colors.white.withOpacity(0.85),
+                          fontWeight: FontWeight.w600,
+                          fontSize: 12,
+                          letterSpacing: 1.2,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        money.format(balance),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 42,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -1.5,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        balance >= 0 ? 'Available balance' : 'Overdrawn',
+                        style: TextStyle(
+                          color: Colors.white.withOpacity(0.8),
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    balance >= 0 ? 'Available balance' : 'Overdrawn',
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(0.8),
-                      fontSize: 14,
-                    ),
+                ),
+                const SizedBox(height: 16),
+                AppCard(
+                  child: Column(
+                    children: [
+                      _row(
+                        context,
+                        'Total collected',
+                        money.format(collected),
+                        AppTheme.success,
+                        Icons.payments_outlined,
+                      ),
+                      const Divider(),
+                      _row(
+                        context,
+                        'Total spent',
+                        money.format(spent),
+                        AppTheme.error,
+                        Icons.shopping_cart_outlined,
+                      ),
+                    ],
                   ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            AppCard(
-              child: Column(
-                children: [
-                  _row(context, 'Total collected', money.format(collected),
-                      AppTheme.success, Icons.payments_outlined),
-                  const Divider(),
-                  _row(context, 'Total spent', money.format(spent),
-                      AppTheme.error, Icons.shopping_cart_outlined),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
+                ),
+                const SizedBox(height: 16),
 
-            // Month forecast last: the plain balances come first, the
-            // projection is the thing you read once you have those.
-            MonthOutlookCard(month: range.from),
-          ],
+                // Month forecast last: the plain balances come first, the
+                // projection is the thing you read once you have those.
+                MonthOutlookCard(month: range.from),
+              ],
+            );
+          },
         );
-      },
-    );
   }
 
-  Widget _row(BuildContext context, String label, String value,
-          Color color, IconData icon) =>
-      Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Row(
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: color.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(icon, color: color, size: 20),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(label,
-                  style: Theme.of(context).textTheme.bodyLarge),
-            ),
-            Text(value,
-                style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 16,
-                    color: color)),
-          ],
+  Widget _row(
+    BuildContext context,
+    String label,
+    String value,
+    Color color,
+    IconData icon,
+  ) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 8),
+    child: Row(
+      children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(icon, color: color, size: 20),
         ),
-      );
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(label, style: Theme.of(context).textTheme.bodyLarge),
+        ),
+        Text(
+          value,
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 16,
+            color: color,
+          ),
+        ),
+      ],
+    ),
+  );
 
   Future<Map<String, double>> _walletTotals(
-      WidgetRef ref, DateTime from, DateTime to) async {
-    final repo = ref.read(repositoryProvider);
-    final collected = await repo.getTotalCollected(from: from, to: to);
-    final expenses = await repo.getExpenses(from: from, to: to);
-    final other = await repo.getOtherExpenses(from: from, to: to);
-    final spent = expenses.fold<double>(0, (s, e) => s + e.total) +
-        other.fold<double>(0, (s, e) => s + e.amount);
-    return {'collected': collected, 'spent': spent};
+    WidgetRef ref,
+    DateTime from,
+    DateTime to,
+  ) async {
+    final bundle = await ref
+        .read(messCloudServiceProvider)
+        .reportBundle(ref.read(activeMessProvider).valueOrNull?.id ?? '');
+
+    final t = bundle.collectedBetween(dayKey(from), dayKey(to));
+
+    return {
+      'collected': t.collected,
+      // Spent from the same bundle, so the two figures on this screen cannot
+      // come from different reads of different months.
+      'spent': bundle.spentBetween(dayKey(from), dayKey(to)),
+    };
   }
 }
 
@@ -294,83 +348,120 @@ class _DailyTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<List<Map<String, Object?>>>(
-      future: ref.read(repositoryProvider).getDailyTotals(range.from, range.to),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final days = snap.data!;
-        if (days.isEmpty) {
-          return const Center(child: Text('No expenses in this range.'));
-        }
-        return ListView.builder(
-          padding: const EdgeInsets.all(16),
-          itemCount: days.length,
-          itemBuilder: (context, i) {
-            final d = days[i];
-            final date = DateTime.parse(d['date'] as String);
-            final total = (d['total'] as num?)?.toDouble() ?? 0;
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: AppCard(
-                onTap: () => _showDayDetail(context, ref, date, money),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: AppTheme.primary.withOpacity(0.1),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text('${date.day}',
-                              style: const TextStyle(
+    return ref
+        .watch(reportBundleProvider)
+        .when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+          data: (bundle) {
+            final days = bundle.dailyTotals(
+              dayKey(range.from),
+              dayKey(range.to),
+            );
+            if (days.isEmpty) {
+              return const Center(child: Text('No expenses in this range.'));
+            }
+
+            return ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: days.length,
+              itemBuilder: (context, i) {
+                final row = days[i];
+                final date = DateTime.parse(row.day);
+                final total = row.total;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: AppCard(
+                    onTap: () =>
+                        _showDayDetail(context, ref, bundle, date, money),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: AppTheme.primary.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text(
+                                '${date.day}',
+                                style: const TextStyle(
                                   fontWeight: FontWeight.w800,
                                   fontSize: 18,
-                                  color: AppTheme.primary)),
-                          Text(DateFormat('MMM').format(date),
-                              style: const TextStyle(
-                                  fontSize: 10, color: AppTheme.textSecondary)),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(DateFormat.EEEE().format(date),
-                              style: Theme.of(context).textTheme.titleSmall),
-                          const SizedBox(height: 2),
-                          Text(DateFormat.yMMMd().format(date),
-                              style: Theme.of(context).textTheme.bodySmall),
-                        ],
-                      ),
-                    ),
-                    Text(money.format(total),
-                        style: const TextStyle(
+                                  color: AppTheme.primary,
+                                ),
+                              ),
+                              Text(
+                                DateFormat('MMM').format(date),
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  color: AppTheme.textSecondary,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                DateFormat.EEEE().format(date),
+                                style: Theme.of(context).textTheme.titleSmall,
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                DateFormat.yMMMd().format(date),
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                        Text(
+                          money.format(total),
+                          style: const TextStyle(
                             fontWeight: FontWeight.w700,
                             fontSize: 16,
-                            color: AppTheme.primary)),
-                  ],
-                ),
-              ),
+                            color: AppTheme.primary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
             );
           },
         );
-      },
-    );
   }
 
-  Future<void> _showDayDetail(BuildContext context, WidgetRef ref,
-      DateTime day, NumberFormat money) async {
-    final repo = ref.read(repositoryProvider);
-    final expenses = await repo.getDayExpenses(day);
-    final other = await repo.getOtherExpenses(from: day, to: day);
+  Future<void> _showDayDetail(
+    BuildContext context,
+    WidgetRef ref,
+    ReportBundle bundle,
+    DateTime day,
+    NumberFormat money,
+  ) async {
+    final key = dayKey(day);
+    final entries = bundle.dayEntries(key);
+    final expenses = entries.meals;
+    final other = entries.other;
 
     if (!context.mounted) return;
     await showModalBottomSheet(
@@ -383,8 +474,10 @@ class _DailyTab extends ConsumerWidget {
           controller: scroll,
           padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
           children: [
-            Text(DateFormat.yMMMEd().format(day),
-                style: Theme.of(context).textTheme.titleLarge),
+            Text(
+              DateFormat.yMMMEd().format(day),
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
             const SizedBox(height: 12),
             for (final e in expenses)
               Padding(
@@ -392,45 +485,67 @@ class _DailyTab extends ConsumerWidget {
                 child: AppCard(
                   padding: const EdgeInsets.all(12),
                   onTap: () async {
-                    // Open the editor for this entry. member_id has to come
-                    // through too, or the editor shows "unassigned" even
-                    // though somebody cooked.
-                    final expense = Expense(
-                      id: e['id'] as int?,
-                      date: DateTime.parse(e['date'] as String),
-                      menuId: e['menu_id'] as int?,
-                      memberId: e['member_id'] as int?,
-                      total: (e['total'] as num?)?.toDouble() ?? 0,
-                    );
+                    // Owners and the member who recorded (or was assigned as
+                    // cook) may edit today's entry. The server enforces the
+                    // same shape, so a denied tap only hides a dead button.
+                    final mess = ref.read(activeMessProvider).valueOrNull;
+                    if (mess != null &&
+                        !mayEditExpense(
+                          mess: mess,
+                          email: ref
+                              .read(currentUserProvider)
+                              .valueOrNull
+                              ?.email,
+                          recordedBy: e.recordedBy ?? '',
+                          cookEmail: e.cookEmail,
+                        )) {
+                      return;
+                    }
+                    final entry = e;
                     Navigator.pop(ctx);
+
                     await Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) => EditExpenseScreen(
-                          expense: expense,
-                          menuName: e['menu_name'] as String? ?? 'Menu entry',
-                          date: DateTime.parse(e['date'] as String),
-                        ),
+                        builder: (_) => EditExpenseScreen(entry: entry),
                       ),
                     );
                     if (context.mounted) {
-                      // Refresh every total and report, not just this tab.
                       await refreshTotals(ref);
+                      // The entry may have been moved to another month by the
+                      // edit, so both the month it came from and the one it is in
+                      // are cleared rather than leaving a stale copy behind.
+                      ref.invalidate(
+                        sharedExpensesProvider(monthOf(entry.date)),
+                      );
+                      ref.invalidate(
+                        sharedExpensesProvider(monthOf(monthKey(day))),
+                      );
                     }
                   },
                   child: Row(
                     children: [
-                      const Icon(Icons.restaurant_menu_outlined,
-                          color: AppTheme.primary, size: 20),
+                      const Icon(
+                        Icons.restaurant_menu_outlined,
+                        color: AppTheme.primary,
+                        size: 20,
+                      ),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: Text(e['menu_name'] as String? ?? 'Menu entry',
-                            style: Theme.of(context).textTheme.titleSmall),
+                        child: Text(
+                          e.menuName,
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
                       ),
-                      Text(money.format((e['total'] as num?)?.toDouble() ?? 0),
-                          style: const TextStyle(fontWeight: FontWeight.w700)),
+                      Text(
+                        money.format(e.total),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
                       const SizedBox(width: 6),
-                      const Icon(Icons.chevron_right,
-                          size: 18, color: AppTheme.textSecondary),
+                      const Icon(
+                        Icons.chevron_right,
+                        size: 18,
+                        color: AppTheme.textSecondary,
+                      ),
                     ],
                   ),
                 ),
@@ -441,11 +556,13 @@ class _DailyTab extends ConsumerWidget {
                 child: AppCard(
                   padding: const EdgeInsets.all(12),
                   onTap: () async {
-                    // Correct amount, category or date for this record.
+                    // Already the shared record, so no lookup is needed.
+                    final record = o;
                     Navigator.pop(ctx);
+
                     await Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) => OtherExpenseScreen(editing: o),
+                        builder: (_) => OtherExpenseScreen(editing: record),
                       ),
                     );
                     if (context.mounted) {
@@ -454,18 +571,28 @@ class _DailyTab extends ConsumerWidget {
                   },
                   child: Row(
                     children: [
-                      const Icon(Icons.receipt_outlined,
-                          color: AppTheme.accent, size: 20),
+                      const Icon(
+                        Icons.receipt_outlined,
+                        color: AppTheme.accent,
+                        size: 20,
+                      ),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: Text(o.category,
-                            style: Theme.of(context).textTheme.titleSmall),
+                        child: Text(
+                          o.category,
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
                       ),
-                      Text(money.format(o.amount),
-                          style: const TextStyle(fontWeight: FontWeight.w700)),
+                      Text(
+                        money.format(o.amount),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
                       const SizedBox(width: 4),
-                      const Icon(Icons.edit_outlined,
-                          size: 16, color: AppTheme.textSecondary),
+                      const Icon(
+                        Icons.edit_outlined,
+                        size: 16,
+                        color: AppTheme.textSecondary,
+                      ),
                     ],
                   ),
                 ),
@@ -485,91 +612,113 @@ class _ByMemberTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<List<Map<String, Object?>>>(
-      future: ref
-          .read(repositoryProvider)
-          .getMemberWiseTotals(range.from, range.to),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final rows = snap.data!;
-        if (rows.isEmpty) {
-          return const Center(
-              child: Text('No member-tagged entries in this range.'));
-        }
-        final grand = rows.fold<double>(
-            0, (s, r) => s + ((r['total'] as num?)?.toDouble() ?? 0));
+    return ref
+        .watch(reportBundleProvider)
+        .when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+          data: (bundle) {
+            final rows = bundle.byCook(dayKey(range.from), dayKey(range.to));
+            if (rows.isEmpty) {
+              return const Center(
+                child: Text('No member-tagged entries in this range.'),
+              );
+            }
 
-        return ListView.separated(
-          padding: const EdgeInsets.all(16),
-          itemCount: rows.length,
-          separatorBuilder: (_, _) => const SizedBox(height: 10),
-          itemBuilder: (context, i) {
-            final r = rows[i];
-            final total = (r['total'] as num?)?.toDouble() ?? 0;
-            final entries = (r['entries'] as num?)?.toInt() ?? 0;
-            final share = grand > 0 ? total / grand : 0.0;
-            final name = r['name'] as String? ?? 'Unassigned';
-            final unassigned = name == 'Unassigned';
+            final grand = rows.fold<double>(0, (s, r) => s + r.total);
 
-            return AppCard(
-              child: Row(
-                children: [
-                  Container(
-                    width: 46,
-                    height: 46,
-                    decoration: BoxDecoration(
-                      color: (unassigned
-                              ? AppTheme.textSecondary
-                              : AppTheme.primary)
-                          .withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(13),
-                    ),
-                    child: Icon(
-                        unassigned ? Icons.person_off : Icons.person,
-                        color: unassigned
-                            ? AppTheme.textSecondary
-                            : AppTheme.primary,
-                        size: 22),
-                  ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(name,
-                            style: Theme.of(context).textTheme.titleSmall),
-                        const SizedBox(height: 2),
-                        Text('$entries ${entries == 1 ? 'entry' : 'entries'} · ${(share * 100).toStringAsFixed(0)}% of spend',
-                            style: Theme.of(context).textTheme.bodySmall),
-                        const SizedBox(height: 8),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: share,
-                            minHeight: 6,
-                            backgroundColor: AppTheme.divider,
-                            valueColor: AlwaysStoppedAnimation(unassigned
-                                ? AppTheme.textSecondary
-                                : AppTheme.primary),
-                          ),
+            return ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: rows.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
+              itemBuilder: (context, i) {
+                final r = rows[i];
+                final total = r.total;
+                final entries = r.entries;
+                final share = grand > 0 ? total / grand : 0.0;
+                final name = r.label;
+                final unassigned = name == 'Unassigned';
+
+                return AppCard(
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color:
+                              (unassigned
+                                      ? AppTheme.textSecondary
+                                      : AppTheme.primary)
+                                  .withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(13),
                         ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Text(money.format(total),
-                      style: const TextStyle(
+                        child: Icon(
+                          unassigned ? Icons.person_off : Icons.person,
+                          color: unassigned
+                              ? AppTheme.textSecondary
+                              : AppTheme.primary,
+                          size: 22,
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              name,
+                              style: Theme.of(context).textTheme.titleSmall,
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '$entries ${entries == 1 ? 'entry' : 'entries'} · ${(share * 100).toStringAsFixed(0)}% of spend',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                            const SizedBox(height: 8),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: LinearProgressIndicator(
+                                value: share,
+                                minHeight: 6,
+                                backgroundColor: AppTheme.divider,
+                                valueColor: AlwaysStoppedAnimation(
+                                  unassigned
+                                      ? AppTheme.textSecondary
+                                      : AppTheme.primary,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Text(
+                        money.format(total),
+                        style: const TextStyle(
                           fontWeight: FontWeight.w800,
-                          color: AppTheme.primary)),
-                ],
-              ),
+                          color: AppTheme.primary,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
             );
           },
         );
-      },
-    );
   }
 }
 
@@ -581,62 +730,84 @@ class _MenuWiseTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<List<Map<String, Object?>>>(
-      future: ref.read(repositoryProvider).getMenuWiseTotals(range.from, range.to),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final rows = snap.data!;
-        if (rows.isEmpty) {
-          return const Center(child: Text('No menu expenses in this range.'));
-        }
-        final grand = rows.fold<double>(
-            0, (s, r) => s + ((r['total'] as num?)?.toDouble() ?? 0));
-        return ListView.separated(
-          padding: const EdgeInsets.all(16),
-          itemCount: rows.length,
-          separatorBuilder: (_, _) => const SizedBox(height: 10),
-          itemBuilder: (context, i) {
-            final r = rows[i];
-            final total = (r['total'] as num?)?.toDouble() ?? 0;
-            final share = grand > 0 ? total / grand : 0.0;
-            return AppCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return ref
+        .watch(reportBundleProvider)
+        .when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+          data: (bundle) {
+            final rows = bundle.byMenu(dayKey(range.from), dayKey(range.to));
+            if (rows.isEmpty) {
+              return const Center(
+                child: Text('No menu expenses in this range.'),
+              );
+            }
+
+            final grand = rows.fold<double>(0, (s, r) => s + r.total);
+            return ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: rows.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
+              itemBuilder: (context, i) {
+                final r = rows[i];
+                final total = r.total;
+                final share = grand > 0 ? total / grand : 0.0;
+                return AppCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(r['name'] as String,
-                          style: Theme.of(context).textTheme.titleMedium),
-                      Text(money.format(total),
-                          style: const TextStyle(
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            r.label,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          Text(
+                            money.format(total),
+                            style: const TextStyle(
                               fontWeight: FontWeight.w800,
-                              color: AppTheme.primary)),
+                              color: AppTheme.primary,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: LinearProgressIndicator(
+                          value: share,
+                          minHeight: 8,
+                          backgroundColor: AppTheme.divider,
+                          valueColor: const AlwaysStoppedAnimation(
+                            AppTheme.primary,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '${(share * 100).toStringAsFixed(1)}% of spending',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: LinearProgressIndicator(
-                      value: share,
-                      minHeight: 8,
-                      backgroundColor: AppTheme.divider,
-                      valueColor:
-                          const AlwaysStoppedAnimation(AppTheme.primary),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text('${(share * 100).toStringAsFixed(1)}% of spending',
-                      style: Theme.of(context).textTheme.bodySmall),
-                ],
-              ),
+                );
+              },
             );
           },
         );
-      },
-    );
   }
 }
 
@@ -648,61 +819,81 @@ class _ItemWiseTab extends ConsumerWidget {
     ref.watch(dataVersionProvider);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<List<Map<String, Object?>>>(
-      future: ref.read(repositoryProvider).getItemWiseTotals(range.from, range.to),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final rows = snap.data!;
-        if (rows.isEmpty) {
-          return const Center(child: Text('No item expenses in this range.'));
-        }
-        final grand = rows.fold<double>(
-            0, (s, r) => s + ((r['total'] as num?)?.toDouble() ?? 0));
-        return ListView.separated(
-          padding: const EdgeInsets.all(16),
-          itemCount: rows.length,
-          separatorBuilder: (_, _) => const SizedBox(height: 10),
-          itemBuilder: (context, i) {
-            final r = rows[i];
-            final total = (r['total'] as num?)?.toDouble() ?? 0;
-            final share = grand > 0 ? total / grand : 0.0;
-            return AppCard(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(r['name'] as String,
-                            style: Theme.of(context).textTheme.titleSmall),
-                        const SizedBox(height: 6),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: share,
-                            minHeight: 6,
-                            backgroundColor: AppTheme.divider,
-                            valueColor:
-                                const AlwaysStoppedAnimation(AppTheme.secondary),
-                          ),
+    return ref
+        .watch(reportBundleProvider)
+        .when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+          data: (bundle) {
+            final rows = bundle.byItem(dayKey(range.from), dayKey(range.to));
+            if (rows.isEmpty) {
+              return const Center(
+                child: Text('No item expenses in this range.'),
+              );
+            }
+
+            final grand = rows.fold<double>(0, (s, r) => s + r.total);
+            return ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: rows.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
+              itemBuilder: (context, i) {
+                final r = rows[i];
+                final total = r.total;
+                final share = grand > 0 ? total / grand : 0.0;
+                return AppCard(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              r.label,
+                              style: Theme.of(context).textTheme.titleSmall,
+                            ),
+                            const SizedBox(height: 6),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: LinearProgressIndicator(
+                                value: share,
+                                minHeight: 6,
+                                backgroundColor: AppTheme.divider,
+                                valueColor: const AlwaysStoppedAnimation(
+                                  AppTheme.secondary,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Text(money.format(total),
-                      style: const TextStyle(
+                      ),
+                      const SizedBox(width: 16),
+                      Text(
+                        money.format(total),
+                        style: const TextStyle(
                           fontWeight: FontWeight.w800,
-                          color: AppTheme.secondary)),
-                ],
-              ),
+                          color: AppTheme.secondary,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
             );
           },
         );
-      },
-    );
   }
 }
 
@@ -715,79 +906,108 @@ class _MembersTab extends ConsumerWidget {
     final month = monthKey(range.from);
     final money = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0);
 
-    return FutureBuilder<List<Map<String, Object?>>>(
-      future: ref.read(repositoryProvider).getMonthCollections(month),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final rows = snap.data!;
-        if (rows.isEmpty) {
-          return const Center(
-              child: Text('No collections set for this month yet.'));
-        }
-        return ListView.separated(
-          padding: const EdgeInsets.all(16),
-          itemCount: rows.length,
-          separatorBuilder: (_, _) => const SizedBox(height: 10),
-          itemBuilder: (context, i) {
-            final r = rows[i];
-            final due = (r['amount_due'] as num?)?.toDouble() ?? 0;
-            final paid = (r['paid'] as num?)?.toDouble() ?? 0;
-            final remaining = due - paid;
-            final overpaid = paid - due;
-            return AppCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(r['member_name'] as String,
-                      style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return ref
+        .watch(reportBundleProvider)
+        .when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load: $e', textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: () => ref.invalidate(reportBundleProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+          data: (bundle) {
+            // A member with no document at all is left out: a share of zero and
+            // no share recorded are different things, and showing "PKR 0 due" for
+            // somebody the owner never set a share for would be a claim, not a
+            // reading.
+            final rows = bundle
+                .collectionsFor(month)
+                .where((c) => c.amountDue > 0 || c.payments.isNotEmpty)
+                .toList();
+
+            if (rows.isEmpty) {
+              return const Center(
+                child: Text('No collections set for this month yet.'),
+              );
+            }
+
+            rows.sort((a, b) => a.email.compareTo(b.email));
+
+            return ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: rows.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
+              itemBuilder: (context, i) {
+                final c = rows[i];
+                final due = c.amountDue;
+                final paid = c.paid;
+                final remaining = due - paid;
+                final overpaid = paid - due;
+
+                return AppCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Paid ${money.format(paid)}',
-                          style: Theme.of(context).textTheme.bodyMedium),
-                      if (due > 0 && overpaid > 0)
-                        Text(
-                          '${money.format(overpaid)} extra',
-                          style: const TextStyle(
-                            color: AppTheme.success,
-                            fontWeight: FontWeight.w700,
+                      Text(
+                        bundle.nameOf(c.email) ?? c.email.split('@').first,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            'Paid ${money.format(paid)}',
+                            style: Theme.of(context).textTheme.bodyMedium,
                           ),
-                        )
-                      else if (remaining > 0)
-                        Text(
-                          '${money.format(remaining)} remaining',
-                          style: const TextStyle(
-                            color: AppTheme.error,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        )
-                      else if (due > 0)
-                        const Text(
-                          'Fully paid',
-                          style: TextStyle(
-                            color: AppTheme.success,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        )
-                      else
-                        const Text(
-                          'No share set',
-                          style: TextStyle(
-                            color: AppTheme.textSecondary,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
+                          if (due > 0 && overpaid > 0)
+                            Text(
+                              '${money.format(overpaid)} extra',
+                              style: const TextStyle(
+                                color: AppTheme.success,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            )
+                          else if (remaining > 0)
+                            Text(
+                              '${money.format(remaining)} remaining',
+                              style: const TextStyle(
+                                color: AppTheme.error,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            )
+                          else if (due > 0)
+                            const Text(
+                              'Fully paid',
+                              style: TextStyle(
+                                color: AppTheme.success,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            )
+                          else
+                            const Text(
+                              'No share set',
+                              style: TextStyle(
+                                color: AppTheme.textSecondary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                        ],
+                      ),
                     ],
                   ),
-                ],
-              ),
+                );
+              },
             );
           },
         );
-      },
-    );
   }
 }

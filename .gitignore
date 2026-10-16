@@ -1,0 +1,7 @@
+# Database copies pulled off a device for debugging. These contain real
+# expense, payment and member records and must never reach the remote.
+_db/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

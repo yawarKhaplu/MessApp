@@ -1,0 +1,215 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email is string;
+    }
+
+    // Google does not normalise the case of an address, and Firebase hands the
+    // token email back exactly as the account stores it. Memberships are keyed
+    // by the lowercased address, so both sides must lowercase or they will
+    // silently fail to match: "Ali@x.com" would look like a stranger.
+    function myEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function membershipPath() {
+      return /databases/$(database)/documents/memberships/$(myEmail());
+    }
+
+    // ---- creators -------------------------------------------------------
+    // Approved to run a mess. Added externally, never from the app.
+    // Reads the caller's own entry only.
+    match /creators/{email} {
+      allow read: if isSignedIn() && email == myEmail();
+      allow write: if false;
+    }
+
+    function isApprovedCreator() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/creators/$(myEmail()));
+    }
+
+    // A membership exists once the person has joined any mess. This is the single
+    // source of truth for "do they already have one", replacing the separate
+    // profile collection.
+    function hasMembership() {
+      return isSignedIn() && exists(membershipPath());
+    }
+
+    function isOwnerOfMess(messId) {
+      return hasMembership()
+        && get(membershipPath()).data.messId == messId
+        && get(membershipPath()).data.role == 'owner';
+    }
+
+    function isMemberOfMess(messId) {
+      return hasMembership() && get(membershipPath()).data.messId == messId;
+    }
+
+    // ---- memberships ----------------------------------------------------
+    // One document per person, keyed by their own email, holding the mess they
+    // belong to and their role in it.
+    //
+    // The document id is the email because a Firebase uid does not exist until
+    // someone signs in, so email is the only identifier available when the owner
+    // invites them.
+    match /memberships/{email} {
+      // A person may read only their own membership.
+      allow read: if isSignedIn() && email == myEmail();
+
+      // Creating your own membership with the owner role is the one case the
+      // app is allowed to make, and only for a mess it just created, identified
+      // by ownerUid. Otherwise only an owner of that mess may add members.
+      allow create: if isSignedIn()
+        && (isApprovedCreator()
+            && request.resource.data.role == 'owner'
+            && request.resource.data.messId is string
+            && getAfter(/databases/$(database)/documents/messes/$(request.resource.data.messId)).data.ownerUid
+               == request.auth.uid)
+        || (request.resource.data.role == 'member'
+            && request.resource.data.messId is string
+            && isOwnerOfMess(request.resource.data.messId));
+
+      // Only an owner may change an existing membership, and never to promote
+      // someone: the role and the mess are both immutable.
+      allow update: if isOwnerOfMess(resource.data.messId)
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.messId == resource.data.messId;
+
+      allow delete: if isOwnerOfMess(resource.data.messId);
+    }
+
+    // ---- messes ---------------------------------------------------------
+    match /messes/{messId} {
+      // Create requires creator approval and no existing membership, so one
+      // account cannot end up running two messes.
+      allow create: if isApprovedCreator()
+        && !hasMembership()
+        && request.resource.data.ownerUid == request.auth.uid;
+
+      // Owners have full management control.
+      allow update, delete: if isOwnerOfMess(messId);
+
+      // Anyone in the mess may read the mess document, which carries the roster.
+      // Split from update/delete above so members are not locked out of their
+      // own mess, which is what a combined "read, update, delete" would do.
+      allow read: if isOwnerOfMess(messId) || isMemberOfMess(messId);
+
+      // Shared expenses: what the mess cooked and what it cost.
+      //
+      // Read access is granted from a field ON the document rather than from the
+      // parent mess. That is deliberate: a rule that reads another document cannot
+      // be proven against a query, so filtering on ownerUid would be denied for
+      // members. Each expense carries the addresses allowed to read it, which
+      // makes "expenses visible to me" provable and works the same for everyone.
+      //
+      // Addresses rather than uids: a Firebase uid cannot be known until somebody
+      // first signs in, and a member sits in the roster with a null uid until they
+      // do. Keying on addresses means visibility works from the moment the owner
+      // adds somebody, with no second sign-in needed before history appears.
+      match /expenses/{expenseId} {
+        // Transparency over transparency: every member of a mess reads every meal
+        // recorded in it, including one who has just joined. The original
+        // address list made a new member's totals (and their view of reports)
+        // disagree with the people who were already there.
+        allow read: if isOwnerOfMess(messId) || isMemberOfMess(messId);
+
+        // The owner may record anything, on anyone's behalf.
+        //
+        // A member may record a meal, but only one attributed to themselves and
+        // only dated roughly today, which stops one member logging meals under
+        // another's name.
+        //
+        // What this cannot do is check the cooking turn. Deriving the turn needs
+        // a date subtraction from an anchor, and rules cannot turn request.time
+        // into a calendar date, so "is it my turn today" is not expressible here.
+        // The app enforces that instead, at the point of saving rather than only
+        // where the button is drawn, so a member cannot reach the write by any
+        // path the UI does not offer.
+        allow create: if isOwnerOfMess(messId)
+          || (isMemberOfMess(messId)
+              && request.resource.data.cookEmail
+                   == request.auth.token.email.lower()
+              && request.resource.data.dateTime <= request.time
+              && request.resource.data.dateTime
+                   >= request.time - duration.value(1, 'd'));
+
+        // Editing. The owner may change anything; a correction changes what the
+        // mess owes and the owner is answerable for that.
+        //
+        // A turn member may correct an entry they recorded. When the owner
+        // assigns the cook on an entry, that assigned cook may also correct it.
+        // Being on turn is not checkable here, so the app applies that half,
+        // but "my own entry" and "the cook I was assigned as" are, and without
+        // them whoever is cooking could rewrite a meal somebody else entered —
+        // the exact thing the turn prevents.
+        //
+        // Three fields are pinned so the permission cannot be laundered into
+        // ownership of the record: recordedBy cannot be changed to match
+        // somebody else, visibleTo cannot be widened to read more of the mess's
+        // history, and the date cannot be moved off today. Rules that do not
+        // mention a field permit it to change, so each one has to be named.
+        allow update: if isOwnerOfMess(messId)
+          || (isMemberOfMess(messId)
+              && (resource.data.recordedBy == request.auth.token.email.lower()
+                  || (resource.data.cookEmail != null
+                      && resource.data.cookEmail == request.auth.token.email.lower()))
+              && request.resource.data.recordedBy == resource.data.recordedBy
+              && request.resource.data.visibleTo == resource.data.visibleTo
+              && request.resource.data.dateTime <= request.time
+              && request.resource.data.dateTime
+                   >= request.time - duration.value(1, 'd'));
+
+        // Removing follows the same split: the owner may remove any entry, and
+        // the cook the owner assigned may remove one of their own. An entry
+        // nobody may delete is an entry nobody can take back, so this mirrors
+        // update rather than being owner-only.
+        allow delete: if isOwnerOfMess(messId)
+          || (isMemberOfMess(messId)
+              && (resource.data.recordedBy == request.auth.token.email.lower()
+                  || (resource.data.cookEmail != null
+                      && resource.data.cookEmail == request.auth.token.email.lower())));
+      }
+
+      // Monthly collections and the payments against them.
+      //
+      // One document per member per month, keyed "<email>__<yyyy-MM>". Members
+      // can read it and only the owner can write it, which matches how a
+      // collection actually works: everyone is shown the figure, only the owner
+      // records it.
+      //
+      // The payment list lives inside the document rather than in a second
+      // subcollection, so one read returns the share and the whole payment
+      // history. Listing them separately would need a query, and a query cannot
+      // be proven against a rule that reads the parent mess — the same failure
+      // that stopped members seeing the roster.
+      match /collections/{collectionId} {
+        allow read: if isMemberOfMess(messId);
+        allow write: if isOwnerOfMess(messId);
+      }
+
+      // Other expenses: gas, rent, chai — spending that is not a meal.
+      //
+      // Keyed by month, one document per month, and always read by its id rather
+      // than queried. That is what lets the membership check appear here at all:
+      // a rule that reads another document cannot be proven against a query, but
+      // a direct read of a document whose id the app already knows is fine.
+      //
+      // Owner-only writes, so every member reads the whole month and there is no
+      // per-person filtering to arrange.
+      match /otherExpenses/{month} {
+        allow read: if isMemberOfMess(messId);
+        allow write: if isOwnerOfMess(messId);
+      }
+
+      // Members get restricted visibility: they may read what is inside the
+      // mess but change nothing. Only the owner can add or remove people.
+      match /{document=**} {
+        allow read: if isMemberOfMess(messId);
+        allow write: if false;
+      }
+    }
+  }
+}

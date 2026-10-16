@@ -1,11 +1,15 @@
 import 'dart:async';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'services/notifications.dart';
+import 'services/cloud_diagnostics.dart';
 import 'providers.dart';
+import 'ui/auth/auth_screen.dart';
 import 'ui/home_screen.dart';
+import 'ui/mess/mess_gate.dart';
 import 'ui/menu_entry_screen.dart';
 import 'ui/menus_screen.dart';
 import 'ui/collection_screen.dart';
@@ -22,6 +26,15 @@ void main() async {
   // the dialog never appeared on a fresh install.
   await NotificationService.instance.init();
 
+  // Firebase must be initialised before any auth call. On Android it reads
+  // android/app/google-services.json through the native plugin, so no generated
+  // options file is needed. Deliberately outside try/catch: if it throws the app
+  // cannot authenticate, and continuing would only fail confusingly later.
+  await diagnoseCloudOperation(
+    'firebase.initialize',
+    () => Firebase.initializeApp(),
+  );
+
   runApp(const ProviderScope(child: MessApp()));
 }
 
@@ -31,10 +44,46 @@ class MessApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return MaterialApp(
-      title: 'MessApp',
+      title: 'MessAppDev',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
-      home: const HomeShell(),
+      // Nothing opens until someone is signed in AND belongs to a mess. The
+      // existing local data is untouched by signing out, so the app can never
+      // lock anyone out of it.
+      home: const _AuthGate(),
+    );
+  }
+}
+
+/// Decides between the sign-in screen and the app itself.
+class _AuthGate extends ConsumerWidget {
+  const _AuthGate();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final user = ref.watch(currentUserProvider);
+
+    return user.when(
+      // Firebase restores the previous session on start-up; a brief splash
+      // beats flashing the sign-in button at someone who is already signed in.
+      loading: () => const _SplashScreen(),
+      data: (account) => account == null
+          ? const SignInScreen()
+          // Signed in, but possibly no mess yet. MessGate decides between
+          // creating one and asking for approval.
+          : const MessGate(),
+      error: (_, __) => const SignInScreen(),
+    );
+  }
+}
+
+class _SplashScreen extends StatelessWidget {
+  const _SplashScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      body: Center(child: CircularProgressIndicator(color: AppTheme.primary)),
     );
   }
 }
@@ -86,9 +135,8 @@ class _HomeShellState extends ConsumerState<HomeShell> {
     final destination = NotificationService.instance.takePendingDestination();
     if (destination != kDestinationAddEntry || !mounted) return;
 
-    await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const MenuEntryScreen()),
-    );
+    await Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => const MenuEntryScreen()));
   }
 
   /// Prompts once, and only when notifications are actually blocked.
